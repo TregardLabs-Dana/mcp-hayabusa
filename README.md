@@ -1,0 +1,66 @@
+# mcp-hayabusa
+
+An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa) for EVTX (Windows event log) analysis, exposing a `scan_evtx` tool to Claude.
+
+## Setup
+
+1. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+
+2. Download the Hayabusa binary and Sigma rules into `./hayabusa/`:
+   ```
+   python download_hayabusa.py
+   ```
+   This fetches the latest release for your OS/architecture and extracts it to `./hayabusa/` (binary at `./hayabusa/hayabusa.exe` on Windows or `./hayabusa/hayabusa` elsewhere, plus `rules/` and `rules/config/`).
+
+3. Keep the ruleset current (recommended before each scanning session):
+   ```
+   ./hayabusa/hayabusa.exe update-rules      # Windows
+   ./hayabusa/hayabusa update-rules          # Linux/macOS
+   ```
+
+## Running the server
+
+```
+python server.py
+```
+
+This starts the MCP server over stdio. Point an MCP client at it, e.g. in Claude Desktop's config:
+
+```json
+{
+  "mcpServers": {
+    "hayabusa": {
+      "command": "python",
+      "args": ["C:\\path\\to\\mcp-hayabusa\\server.py"]
+    }
+  }
+}
+```
+
+## Tool: `scan_evtx`
+
+Scans an EVTX file (or a directory of EVTX files) with Hayabusa and returns detections as structured JSON.
+
+**Parameters:**
+- `evtx_path` (string, required) — path to a `.evtx` file or a directory containing them
+- `min_severity` (string, optional, default `"informational"`) — minimum severity to include: `informational`, `low`, `medium`, `high`, `critical`
+
+**Returns:**
+```json
+{
+  "evtx_path": "...",
+  "min_severity": "...",
+  "count": 42,
+  "detections": [ { "Timestamp": "...", "RuleTitle": "...", "Level": "...", "...": "..." } ]
+}
+```
+
+On failure (missing file, missing Hayabusa binary, invalid `min_severity`, scan timeout, or a Hayabusa scan error), it returns `{"error": "..."}` instead of raising.
+
+## Requirements
+
+- Python with the `mcp` library (see `requirements.txt`)
+- The Hayabusa CLI, installed via `download_hayabusa.py`
