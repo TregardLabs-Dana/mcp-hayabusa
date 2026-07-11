@@ -47,18 +47,26 @@ Scans an EVTX file (or a directory of EVTX files) with Hayabusa and returns dete
 **Parameters:**
 - `evtx_path` (string, required) — path to a `.evtx` file or a directory containing them
 - `min_severity` (string, optional, default `"informational"`) — minimum severity to include: `informational`, `low`, `medium`, `high`, `critical`
+- `rule_filter` (string, optional) — case-insensitive substring match against each detection's rule title (e.g. `"lateral"` or `"mimikatz"`); only matching detections are returned. Hayabusa has no native rule-title filter, so this is applied after the scan.
+- `output_format` (string, optional, default `"summary"`) — `"summary"` returns condensed detections (`Timestamp`, `RuleTitle`, `Level`, `Computer`, `Channel`, `EventID`, `RecordID`); `"full"` includes the complete `Details`/`ExtraFieldInfo` payload for each detection
+- `max_results` (integer, optional) — caps the number of detections returned, applied after `rule_filter`
 
 **Returns:**
 ```json
 {
   "evtx_path": "...",
   "min_severity": "...",
+  "rule_filter": "...",
+  "output_format": "...",
+  "total_count": 68,
   "count": 42,
+  "truncated": false,
   "detections": [ { "Timestamp": "...", "RuleTitle": "...", "Level": "...", "...": "..." } ]
 }
 ```
+`total_count` is the number of matching detections before `max_results` is applied; `count` is the number actually returned; `truncated` is `true` if `max_results` cut off results.
 
-On failure (missing file, missing Hayabusa binary, invalid `min_severity`, scan timeout, or a Hayabusa scan error), it returns `{"error": "..."}` instead of raising.
+On failure (missing file, missing Hayabusa binary, invalid `min_severity`/`output_format`/`max_results`, scan timeout, or a Hayabusa scan error), it returns `{"error": "..."}` instead of raising.
 
 ## Requirements
 
