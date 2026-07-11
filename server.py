@@ -15,15 +15,38 @@ RULES_DIR = HAYABUSA_DIR / "rules"
 RULES_CONFIG_DIR = RULES_DIR / "config"
 
 VALID_SEVERITIES = ["informational", "low", "medium", "high", "critical"]
+VALID_OUTPUT_FORMATS = ["summary", "full"]
+
+# Fields kept per detection when output_format="summary" - enough to triage
+# without the full Details/ExtraFieldInfo payload that can blow past tool
+# output size limits on large scans.
+SUMMARY_FIELDS = ["Timestamp", "RuleTitle", "Level", "Computer", "Channel", "EventID", "RecordID"]
 
 SCAN_TIMEOUT_SECONDS = 300
 
 
 @mcp.tool()
-def scan_evtx(evtx_path: str, min_severity: str = "informational") -> dict:
+def scan_evtx(
+    evtx_path: str,
+    min_severity: str = "informational",
+    rule_filter: str | None = None,
+    output_format: str = "summary",
+    max_results: int | None = None,
+) -> dict:
     """Scan an EVTX file (or directory of EVTX files) with Hayabusa and
     return detections as structured JSON, filtered to a minimum severity
-    level (informational, low, medium, high, critical)."""
+    level (informational, low, medium, high, critical).
+
+    rule_filter: case-insensitive substring match against each detection's
+        rule title (e.g. "lateral" or "mimikatz"); only matching detections
+        are returned.
+    output_format: "summary" (default) returns condensed detections (time,
+        rule, severity, host, channel, event/record IDs); "full" includes
+        the complete Details/ExtraFieldInfo payload for each detection.
+    max_results: caps the number of detections returned (after rule_filter
+        is applied). The response's "total_count" reflects the count before
+        this cap, and "truncated" is set if results were cut off.
+    """
     path = Path(evtx_path)
     if not path.exists():
         return {"error": f"Path not found: {evtx_path}"}
@@ -33,6 +56,15 @@ def scan_evtx(evtx_path: str, min_severity: str = "informational") -> dict:
         return {
             "error": f"Invalid min_severity '{min_severity}'. Must be one of: {VALID_SEVERITIES}"
         }
+
+    output_format = output_format.lower()
+    if output_format not in VALID_OUTPUT_FORMATS:
+        return {
+            "error": f"Invalid output_format '{output_format}'. Must be one of: {VALID_OUTPUT_FORMATS}"
+        }
+
+    if max_results is not None and max_results <= 0:
+        return {"error": f"Invalid max_results '{max_results}'. Must be a positive integer."}
 
     if not HAYABUSA_EXE.exists():
         return {"error": f"Hayabusa executable not found at {HAYABUSA_EXE}. Run download_hayabusa.py first."}
@@ -86,10 +118,27 @@ def scan_evtx(evtx_path: str, min_severity: str = "informational") -> dict:
                 except json.JSONDecodeError:
                     continue
 
+    if rule_filter:
+        needle = rule_filter.lower()
+        detections = [d for d in detections if needle in d.get("RuleTitle", "").lower()]
+
+    total_count = len(detections)
+
+    truncated = max_results is not None and total_count > max_results
+    if max_results is not None:
+        detections = detections[:max_results]
+
+    if output_format == "summary":
+        detections = [{k: d.get(k) for k in SUMMARY_FIELDS} for d in detections]
+
     return {
         "evtx_path": evtx_path,
         "min_severity": min_severity,
+        "rule_filter": rule_filter,
+        "output_format": output_format,
+        "total_count": total_count,
         "count": len(detections),
+        "truncated": truncated,
         "detections": detections,
     }
 
