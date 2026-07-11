@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import yaml
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("hayabusa")
@@ -140,6 +141,86 @@ def scan_evtx(
         "count": len(detections),
         "truncated": truncated,
         "detections": detections,
+    }
+
+
+def _rule_summary(rule: dict, rule_path: Path) -> dict:
+    description = rule.get("description")
+    return {
+        "id": rule.get("id"),
+        "title": rule.get("title"),
+        "level": rule.get("level"),
+        "status": rule.get("status"),
+        "description": description.strip().splitlines()[0] if description else None,
+        "logsource": {k: v for k, v in (rule.get("logsource") or {}).items() if v},
+        "tags": rule.get("tags") or [],
+        "file": str(rule_path.relative_to(RULES_DIR)),
+    }
+
+
+@mcp.tool()
+def get_hayabusa_rules(keyword: str | None = None, max_results: int = 100) -> dict:
+    """List available Hayabusa/Sigma detection rules, optionally filtered by
+    a keyword. Use this before scan_evtx to see what detections exist (e.g.
+    to find a rule_filter value) or to check whether a technique/tool has
+    rule coverage.
+
+    keyword: case-insensitive substring matched against each rule's title,
+        description, tags, and id. If omitted, all rules are listed
+        (subject to max_results).
+    max_results: caps the number of rules returned (default 100). The
+        response's "total_count" reflects the count before this cap.
+    """
+    if not RULES_DIR.exists():
+        return {"error": f"Rules directory not found at {RULES_DIR}. Run download_hayabusa.py first."}
+
+    if max_results <= 0:
+        return {"error": f"Invalid max_results '{max_results}'. Must be a positive integer."}
+
+    needle = keyword.lower() if keyword else None
+    matches = []
+    for rule_path in RULES_DIR.rglob("*.yml"):
+        try:
+            text = rule_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+        # Cheap substring check before the full YAML parse: title/description/
+        # tags/id are all plain text in the file, so if the keyword isn't
+        # anywhere in the raw text it can't match any of those fields either.
+        if needle and needle not in text.lower():
+            continue
+
+        try:
+            rule = yaml.safe_load(text)
+        except yaml.YAMLError:
+            continue
+        if not isinstance(rule, dict) or not rule.get("title"):
+            continue
+
+        if needle:
+            haystack = " ".join(
+                str(v) for v in (
+                    rule.get("title"), rule.get("description"), rule.get("id"),
+                    *(rule.get("tags") or []),
+                )
+                if v
+            ).lower()
+            if needle not in haystack:
+                continue
+
+        matches.append(_rule_summary(rule, rule_path))
+
+    total_count = len(matches)
+    truncated = total_count > max_results
+    matches = matches[:max_results]
+
+    return {
+        "keyword": keyword,
+        "total_count": total_count,
+        "count": len(matches),
+        "truncated": truncated,
+        "rules": matches,
     }
 
 

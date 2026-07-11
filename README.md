@@ -1,6 +1,6 @@
 # mcp-hayabusa
 
-An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa) for EVTX (Windows event log) analysis, exposing a `scan_evtx` tool to Claude.
+An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa) for EVTX (Windows event log) analysis, exposing `scan_evtx` and `get_hayabusa_rules` tools to Claude.
 
 ## Setup
 
@@ -68,7 +68,42 @@ Scans an EVTX file (or a directory of EVTX files) with Hayabusa and returns dete
 
 On failure (missing file, missing Hayabusa binary, invalid `min_severity`/`output_format`/`max_results`, scan timeout, or a Hayabusa scan error), it returns `{"error": "..."}` instead of raising.
 
+## Tool: `get_hayabusa_rules`
+
+Lists available Hayabusa/Sigma detection rules from `./hayabusa/rules/`, optionally filtered by keyword. Useful for seeing what detections exist before scanning, or for finding a good `rule_filter` value for `scan_evtx`. Hayabusa has no built-in rule-listing command, so this reads and parses the rule YAML files directly.
+
+**Parameters:**
+- `keyword` (string, optional) — case-insensitive substring matched against each rule's title, description, tags, and id. If omitted, all rules are listed (subject to `max_results`)
+- `max_results` (integer, optional, default `100`) — caps the number of rules returned
+
+**Returns:**
+```json
+{
+  "keyword": "...",
+  "total_count": 66,
+  "count": 66,
+  "truncated": false,
+  "rules": [
+    {
+      "id": "...",
+      "title": "...",
+      "level": "...",
+      "status": "...",
+      "description": "...",
+      "logsource": { "product": "windows", "service": "..." },
+      "tags": ["attack.lateral-movement", "..."],
+      "file": "hayabusa\\builtin\\System\\Sys_7045_Med_LateralMovement-PSEXEC.yml"
+    }
+  ]
+}
+```
+`total_count` is the number of matching rules before `max_results` is applied; `count` is the number actually returned; `truncated` is `true` if `max_results` cut off results.
+
+A keyword search checks a raw-text prefilter before parsing each rule's YAML, so it typically runs in ~1-2 seconds. Listing all ~5,000 rules with no keyword takes several seconds longer since every rule file must be parsed.
+
+On failure (missing rules directory or invalid `max_results`), it returns `{"error": "..."}` instead of raising.
+
 ## Requirements
 
-- Python with the `mcp` library (see `requirements.txt`)
+- Python with the `mcp` and `pyyaml` libraries (see `requirements.txt`)
 - The Hayabusa CLI, installed via `download_hayabusa.py`
