@@ -12,6 +12,7 @@ description: |
 references:
     - https://attack.mitre.org/techniques/T1003/002/
     - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/process_creation/proc_creation_win_registry_hive_dumping.yml
+    - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/process_creation/proc_creation_win_reg_dumping_sensitive_hives.yml
 author: detection-engineering-lab
 date: 2026-07-18
 modified: 2026-07-18
@@ -23,15 +24,20 @@ logsource:
     product: windows
 detection:
     selection_img:
-        Image|endswith: '\reg.exe'
+        - Image|endswith: '\reg.exe'
+        - OriginalFileName: 'reg.exe'
     selection_cli:
         CommandLine|contains: 'save'
+    selection_hklm:
+        CommandLine|contains:
+            - 'hklm'
+            - 'hkey_local_machine'
     selection_hive:
         CommandLine|contains:
-            - 'hklm\sam'
-            - 'hklm\system'
-            - 'hklm\security'
-    condition: selection_img and selection_cli and selection_hive
+            - '\sam '
+            - '\system '
+            - '\security '
+    condition: selection_img and selection_cli and selection_hklm and selection_hive
 falsepositives:
     - Legitimate registry backup steps in documented IT support or troubleshooting scripts
     - Backup software that snapshots registry hives as part of a full system backup
@@ -64,3 +70,19 @@ test_cases:
       log:
           Image: 'C:\Windows\System32\reg.exe'
           CommandLine: 'reg.exe save hklm\software\myapp C:\Temp\myapp.save'
+    - description: SECURITY hive saved using the full HKEY_LOCAL_MACHINE form instead of the hklm abbreviation
+      should_match: true
+      log:
+          Image: 'C:\Windows\System32\reg.exe'
+          CommandLine: 'reg.exe save HKEY_LOCAL_MACHINE\SECURITY C:\Windows\Temp\security.save'
+    - description: reg.exe renamed to evade Image-based detection, identified via OriginalFileName instead
+      should_match: true
+      log:
+          Image: 'C:\Users\Public\r.exe'
+          OriginalFileName: 'reg.exe'
+          CommandLine: 'r.exe save hklm\sam C:\Users\Public\sam.save'
+    - description: legitimate backup path containing "samples" that should not collide with the SAM hive substring match
+      should_match: false
+      log:
+          Image: 'C:\Windows\System32\reg.exe'
+          CommandLine: 'reg.exe save hklm\software\vendor C:\backups\samples\output.reg'
