@@ -4,8 +4,10 @@ rule standards (see ../SKILL.md). Exits non-zero if any rule fails.
 Usage:
     python validate_rule.py <rule.yml | directory> [...]
     python validate_rule.py                          # defaults to rules/
+    python validate_rule.py --json <rule.yml | directory> [...]
 """
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -74,40 +76,67 @@ def check_filename(rule_path: Path) -> tuple[bool, str]:
 
 
 CHECKS = [
-    ("ATT&CK technique mapping", check_technique_mapping),
-    ("Severity + justification", check_severity),
-    ("False positives documented", check_falsepositives),
-    ("Test cases", check_test_cases),
+    ("technique_mapping", check_technique_mapping),
+    ("severity", check_severity),
+    ("falsepositives", check_falsepositives),
+    ("test_cases", check_test_cases),
 ]
 
+CHECK_LABELS = {
+    "technique_mapping": "ATT&CK technique mapping",
+    "severity": "Severity + justification",
+    "falsepositives": "False positives documented",
+    "test_cases": "Test cases",
+    "filename_convention": "Filename convention",
+}
 
-def validate_file(rule_path: Path) -> bool:
+
+def collect_results(rule_path: Path) -> dict:
     try:
         rule = yaml.safe_load(rule_path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
-        print(f"{rule_path}: FAIL - could not parse YAML: {exc}")
-        return False
+        return {
+            "file": str(rule_path),
+            "passed": False,
+            "checks": {},
+            "issues": [f"could not parse YAML: {exc}"],
+        }
 
     if not isinstance(rule, dict):
-        print(f"{rule_path}: FAIL - not a YAML mapping")
-        return False
+        return {
+            "file": str(rule_path),
+            "passed": False,
+            "checks": {},
+            "issues": ["not a YAML mapping"],
+        }
 
+    checks = {}
+    issues = []
     ok = True
-    print(f"\n{rule_path}")
     for name, fn in CHECKS:
         passed, detail = fn(rule)
+        checks[name] = {"passed": passed, "detail": detail}
         ok = ok and passed
-        print(f"  [{'PASS' if passed else 'FAIL'}] {name}: {detail}")
+        if not passed:
+            issues.append(f"{name}: {detail}")
 
     passed, detail = check_filename(rule_path)
+    checks["filename_convention"] = {"passed": passed, "detail": detail}
     ok = ok and passed
-    print(f"  [{'PASS' if passed else 'FAIL'}] Filename convention: {detail}")
+    if not passed:
+        issues.append(f"filename_convention: {detail}")
 
-    return ok
+    return {"file": str(rule_path), "passed": ok, "checks": checks, "issues": issues}
 
 
-def main() -> None:
-    targets = sys.argv[1:] or [str(DEFAULT_TARGET)]
+def print_results(result: dict) -> None:
+    print(f"\n{result['file']}")
+    for key, info in result["checks"].items():
+        label = CHECK_LABELS.get(key, key)
+        print(f"  [{'PASS' if info['passed'] else 'FAIL'}] {label}: {info['detail']}")
+
+
+def resolve_paths(targets: list[str]) -> list[Path]:
     paths = []
     for target in targets:
         path = Path(target)
@@ -117,17 +146,33 @@ def main() -> None:
             paths.append(path)
         else:
             print(f"warning: '{target}' not found", file=sys.stderr)
+    return paths
 
+
+def main() -> None:
+    args = sys.argv[1:]
+    as_json = "--json" in args
+    targets = [a for a in args if a != "--json"] or [str(DEFAULT_TARGET)]
+
+    paths = resolve_paths(targets)
     if not paths:
-        print("No rule files found.", file=sys.stderr)
+        if as_json:
+            print(json.dumps({"error": "No rule files found.", "results": []}))
+        else:
+            print("No rule files found.", file=sys.stderr)
         sys.exit(1)
 
-    all_ok = True
-    for path in paths:
-        all_ok = validate_file(path) and all_ok
+    results = [collect_results(path) for path in paths]
+    all_ok = all(r["passed"] for r in results)
 
-    print()
-    print("All rules PASS" if all_ok else "Some rules FAILED - see above")
+    if as_json:
+        print(json.dumps({"all_passed": all_ok, "results": results}, indent=2))
+    else:
+        for result in results:
+            print_results(result)
+        print()
+        print("All rules PASS" if all_ok else "Some rules FAILED - see above")
+
     sys.exit(0 if all_ok else 1)
 
 

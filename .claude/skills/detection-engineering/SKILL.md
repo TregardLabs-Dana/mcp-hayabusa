@@ -81,6 +81,7 @@ Filenames (the `.yml` stem, which becomes the `name` field in `detection://rules
 ```bash
 python .claude/skills/detection-engineering/scripts/validate_rule.py           # validates everything in rules/
 python .claude/skills/detection-engineering/scripts/validate_rule.py rules/dcsync_4662.yml   # validates one rule
+python .claude/skills/detection-engineering/scripts/validate_rule.py --json rules/dcsync_4662.yml   # same checks, JSON output for tooling
 ```
 
 Exits non-zero if anything fails. Run this after writing or editing a rule, before considering the work done.
