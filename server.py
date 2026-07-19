@@ -28,6 +28,13 @@ TECHNIQUE_ID_RE = re.compile(r"t?\d{4}(\.\d{3})?", re.IGNORECASE)
 # Curated incident response playbooks (YAML), one per alert family.
 PLAYBOOKS_DIR = PROJECT_ROOT / "playbooks"
 
+# Curated environment-specific knowledge (YAML): hosts.yml, services.yml,
+# baselines.yml, each holding a list under a top-level key of the same name.
+ENVIRONMENT_DIR = PROJECT_ROOT / "environment"
+
+# Curated past investigation case notes (YAML), one file per case.
+INVESTIGATIONS_DIR = PROJECT_ROOT / "investigations"
+
 # Local cache of MITRE ATT&CK technique metadata, built by download_attack_data.py.
 ATTACK_TECHNIQUES_PATH = PROJECT_ROOT / "mappings" / "attack_techniques.json"
 
@@ -516,8 +523,10 @@ def _rule_technique_ids(rule: dict) -> set[str]:
     return ids
 
 
-def _playbook_technique_ids(playbook: dict) -> set[str]:
-    return {"T" + str(t).upper().lstrip("T") for t in (playbook.get("techniques") or [])}
+def _normalized_technique_ids(entry: dict) -> set[str]:
+    """Normalize a "techniques" list (as used by both playbooks/*.yml and
+    investigations/*.yml) to "T1003.001"-style IDs."""
+    return {"T" + str(t).upper().lstrip("T") for t in (entry.get("techniques") or [])}
 
 
 def _find_playbooks_by_alert(alert_name: str) -> tuple[list[dict], str | None]:
@@ -551,7 +560,7 @@ def _find_playbooks_by_alert(alert_name: str) -> tuple[list[dict], str | None]:
     technique_matches = [
         _playbook_summary(playbook, pb_path, PLAYBOOKS_DIR)
         for pb_path, playbook in playbooks
-        if matching_technique_ids & _playbook_technique_ids(playbook)
+        if matching_technique_ids & _normalized_technique_ids(playbook)
     ]
     return technique_matches, "technique_overlap" if technique_matches else None
 
@@ -606,6 +615,137 @@ def get_playbooks_by_alert(alert_name: str) -> dict:
         "count": len(matches),
         "playbooks": matches,
     }
+
+
+def _load_environment_file(filename: str, list_key: str) -> dict:
+    """Load one environment/*.yml file and return its list_key entries."""
+    if not ENVIRONMENT_DIR.exists():
+        return {"error": f"Environment directory not found at {ENVIRONMENT_DIR}"}
+
+    path = ENVIRONMENT_DIR / filename
+    if not path.exists():
+        return {"error": f"'{filename}' not found in {ENVIRONMENT_DIR}"}
+
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        return {"error": f"Failed to read '{filename}': {exc}"}
+
+    entries = (data or {}).get(list_key)
+    if not isinstance(entries, list):
+        return {"error": f"'{filename}' is malformed: expected a list under '{list_key}'"}
+
+    return {"count": len(entries), list_key: entries}
+
+
+@mcp.resource("detection://environment/hosts")
+def get_environment_hosts() -> dict:
+    """List known hosts and their roles (environment/hosts.yml) - e.g. which
+    hosts are domain controllers, jump boxes, file servers, or workstation
+    fleets. Useful for judging whether an alert's source/target host is
+    expected to behave the way it did (e.g. an admin logon from a host
+    other than the designated jump box)."""
+    return _load_environment_file("hosts.yml", "hosts")
+
+
+@mcp.resource("detection://environment/services")
+def get_environment_services() -> dict:
+    """List critical services and the hosts that run them
+    (environment/services.yml) - e.g. Active Directory, file shares, mail -
+    with criticality and ownership, to help prioritize an alert that
+    touches one of them."""
+    return _load_environment_file("services.yml", "services")
+
+
+@mcp.resource("detection://environment/baselines")
+def get_environment_baselines() -> dict:
+    """List normal-behavior baselines per host role or hostname
+    (environment/baselines.yml) - expected vs anomalous activity (logon
+    sources, protocols, business hours), to help judge whether a detection
+    is consistent with normal operations or worth escalating."""
+    return _load_environment_file("baselines.yml", "baselines")
+
+
+def _iter_investigations():
+    """Yield (path, parsed case) for every valid investigation in
+    INVESTIGATIONS_DIR."""
+    for case_path in sorted(INVESTIGATIONS_DIR.glob("*.yml")):
+        try:
+            case = yaml.safe_load(case_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(case, dict) and case.get("case_id"):
+            yield case_path, case
+
+
+def _investigation_summary(case: dict, case_path: Path, base_dir: Path) -> dict:
+    summary = case.get("summary")
+    return {
+        "case_id": case.get("case_id"),
+        "title": case.get("title"),
+        "status": case.get("status"),
+        "disposition": case.get("disposition"),
+        "severity": case.get("severity"),
+        "opened": case.get("opened"),
+        "closed": case.get("closed"),
+        "techniques": case.get("techniques") or [],
+        "hosts": case.get("hosts") or [],
+        "summary": summary.strip().splitlines()[0] if summary else None,
+        "file": str(case_path.relative_to(base_dir)),
+    }
+
+
+def _find_investigations_by_technique(technique_id: str) -> list[dict]:
+    normalized_id = "T" + technique_id.upper().lstrip("T")
+    return [
+        _investigation_summary(case, case_path, INVESTIGATIONS_DIR)
+        for case_path, case in _iter_investigations()
+        if normalized_id in _normalized_technique_ids(case)
+    ]
+
+
+@mcp.resource("detection://investigations")
+def list_investigations() -> dict:
+    """List all past investigation case notes (investigations/ directory)."""
+    if not INVESTIGATIONS_DIR.exists():
+        return {"error": f"Investigations directory not found at {INVESTIGATIONS_DIR}"}
+
+    cases = [_investigation_summary(case, case_path, INVESTIGATIONS_DIR) for case_path, case in _iter_investigations()]
+    return {"count": len(cases), "investigations": cases}
+
+
+@mcp.resource("detection://investigations/{case_id}")
+def get_investigation(case_id: str) -> dict:
+    """Get a specific past investigation's full notes by case ID (e.g.
+    "CASE-2026-0031" or "case-2026-0031" - case-insensitive, matched
+    against the .yml filename stem in investigations/)."""
+    if not RULE_NAME_RE.fullmatch(case_id):
+        return {"error": f"Invalid case id '{case_id}'"}
+
+    case_path = INVESTIGATIONS_DIR / f"{case_id.lower()}.yml"
+    if not case_path.exists():
+        return {"error": f"Investigation '{case_id}' not found in {INVESTIGATIONS_DIR}"}
+
+    try:
+        raw = case_path.read_text(encoding="utf-8")
+        case = yaml.safe_load(raw)
+    except (OSError, yaml.YAMLError) as exc:
+        return {"error": f"Failed to read investigation '{case_id}': {exc}"}
+
+    return {"case_id": case_id, "file": case_path.name, "investigation": case, "raw": raw}
+
+
+@mcp.resource("detection://investigations/by-technique/{technique_id}")
+def get_investigations_by_technique(technique_id: str) -> dict:
+    """List past investigations whose "techniques" list includes a given
+    ATT&CK technique ID, e.g. "T1003.006" or "t1003.006" (case-insensitive,
+    with or without the leading "T")."""
+    if not INVESTIGATIONS_DIR.exists():
+        return {"error": f"Investigations directory not found at {INVESTIGATIONS_DIR}"}
+
+    normalized_id = "T" + technique_id.upper().lstrip("T")
+    cases = _find_investigations_by_technique(technique_id)
+    return {"technique_id": normalized_id, "count": len(cases), "investigations": cases}
 
 
 @mcp.tool()

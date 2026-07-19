@@ -1,0 +1,60 @@
+# Example environment inventory for this lab/course project. Replace with
+# your real observed baselines - the entries below are illustrative
+# starting points, not measured data. "scope" is a role from hosts.yml
+# (or a specific "hostname"); business_hours is UTC.
+baselines:
+  - scope: domain-controller
+    description: Expected baseline behavior for DC01/DC02.
+    business_hours: "Mon-Fri 20:00-23:00 UTC (change window); otherwise no planned interactive activity"
+    normal:
+      - "Interactive/RDP logons only from JUMP01, by Identity/AD Team admins."
+      - "Kerberos authentication only; NTLM should not appear (NTLM auditing/restriction enabled)."
+      - "Replication traffic (DS-Replication-Get-Changes*) only between DC01<->DC02 machine accounts and the Azure AD Connect sync account."
+      - "TGS/TGT issuance (4769/4768) using AES encryption for domain-joined accounts."
+    anomalous:
+      - "Any NTLM logon (EventID 4624 Type 3, AuthenticationPackageName NTLM) - see pass-the-hash playbook."
+      - "A directory replication request (4662 with replication GUIDs) from an account other than DC01/DC02 or the AAD Connect sync account - see credential-theft playbook (DCSync)."
+      - "Interactive or RDP logon from any host other than JUMP01."
+      - "RC4-HMAC (0x17) ticket encryption for 4768/4769 - see credential-theft playbook (Kerberoasting/AS-REP Roasting)."
+
+  - scope: file-server
+    description: Expected baseline behavior for FS01.
+    business_hours: "Mon-Fri 06:00-20:00 UTC"
+    normal:
+      - "SMB/admin-share access (5140/5145) from JUMP01 or Backup01 only."
+      - "File access volume consistent with normal Finance/HR working patterns during business hours."
+    anomalous:
+      - "Administrative share access (ADMIN$, C$, IPC$) from any host other than JUMP01/Backup01 - see pass-the-hash playbook."
+      - "Bulk file read/copy activity outside business hours."
+
+  - scope: jump-box
+    description: Expected baseline behavior for JUMP01.
+    business_hours: "Mon-Fri 06:00-22:00 UTC"
+    normal:
+      - "Interactive RDP logons from named IT Infrastructure/Identity admin accounts, from known corporate IP ranges only."
+      - "Outbound RDP/WinRM/SMB sessions from JUMP01 to DC01, DC02, FS01, MAIL01, and the SVR-APP* fleet."
+    anomalous:
+      - "Logons from service accounts or unrecognized accounts."
+      - "Outbound admin sessions from JUMP01 to hosts outside the known server inventory."
+
+  - scope: workstation
+    description: Expected baseline behavior for the WKSTN-* fleet.
+    business_hours: "Mon-Fri 07:00-19:00 UTC, per assigned user's normal working pattern"
+    normal:
+      - "Interactive logon by the workstation's assigned primary user(s) only."
+      - "Kerberos-only authentication to domain resources."
+      - "No inbound admin-share or RDP connections from other workstations."
+    anomalous:
+      - "NTLM authentication attempts, particularly Type 3 network logons with NtLmSsp - see pass-the-hash playbook."
+      - "Execution of known offensive tooling (Mimikatz, Rubeus, CrackMapExec, password-spray scripts) - see credential-theft and password-spraying playbooks."
+      - "Outbound admin-share or WMI/WinRM connections to servers or other workstations."
+
+  - scope: application-server
+    description: Expected baseline behavior for the SVR-APP* fleet.
+    business_hours: "24/7 (application servers); administrative activity expected only during the DC change window or documented maintenance"
+    normal:
+      - "Service-account logons only (batch/service logon types), not interactive."
+      - "Administrative interactive logons only from JUMP01, and only during a documented maintenance window."
+    anomalous:
+      - "Interactive logon by a service account."
+      - "Administrative logon from JUMP01 outside a documented maintenance window, or from any other host at any time."

@@ -1,0 +1,56 @@
+# Example past-investigation notes for this lab/course project. Illustrative,
+# not a real incident - hostnames/accounts reference the example inventory in
+# environment/hosts.yml.
+case_id: CASE-2026-0031
+title: DCSync detected against DC01 from over-privileged backup service account
+status: closed
+disposition: true_positive
+severity: critical
+opened: 2026-03-04
+closed: 2026-03-06
+techniques:
+    - T1003.006
+hosts:
+    - DC01
+accounts:
+    - svc-backup
+triggered_by:
+    - dcsync_4662
+playbook_used: credential-theft
+summary: |
+    A directory replication request (EventID 4662, DS-Replication-Get-Changes
+    extended right) was raised against DC01 from svc-backup, a non-DC,
+    non-sync-tool account - matching the dcsync_4662 rule. Confirmed as
+    unauthorized credential extraction: svc-backup's password had been
+    reused on a compromised jump host from an earlier, unrelated incident,
+    and the attacker used it to pull password hashes for several
+    privileged accounts before detection.
+timeline:
+    - timestamp: "2026-03-04T14:12:03Z"
+      event: dcsync_4662 fires on DC01 for SubjectUserName=svc-backup.
+    - timestamp: "2026-03-04T14:30:00Z"
+      event: On-call analyst triages via credential-theft playbook; confirms svc-backup is not DC01/DC02 and not the AAD Connect sync account.
+    - timestamp: "2026-03-04T15:05:00Z"
+      event: svc-backup disabled; source host of the authenticated session identified and isolated.
+    - timestamp: "2026-03-05T09:00:00Z"
+      event: krbtgt double-reset performed; all privileged account passwords rotated as a precaution.
+    - timestamp: "2026-03-06T17:00:00Z"
+      event: Case closed after confirming no further replication or logon activity from svc-backup.
+findings:
+    - "svc-backup had been granted DS-Replication-Get-Changes / DS-Replication-Get-Changes-All directly during a 2025 backup-tool migration, as a workaround, and the grant was never reviewed or revoked."
+    - "svc-backup's password matched a password reused on a workstation compromised in an unrelated phishing incident two weeks prior."
+    - "No evidence the extracted hashes were used elsewhere before detection (checked via account lockout/logon review)."
+root_cause: >
+    An over-permissioned service account (replication rights that should
+    only belong to Domain Controllers or the AAD Connect sync account)
+    combined with password reuse from an earlier, separately-remediated
+    compromise.
+remediation:
+    - Revoked svc-backup's replication rights; backup tooling reconfigured to use a dedicated, monitored sync account instead.
+    - Rotated svc-backup credentials and performed a krbtgt double-reset.
+    - Opened a quarterly audit task for all AD accounts holding replication rights.
+lessons_learned:
+    - "Migration-era permission workarounds need an expiry/review step, not just a one-time grant."
+    - "Password reuse across unrelated incidents extended blast radius; reinforced the password-rotation step in the credential-theft playbook's containment phase."
+references:
+    - https://attack.mitre.org/techniques/T1003/006/

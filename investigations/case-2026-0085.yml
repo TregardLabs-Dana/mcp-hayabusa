@@ -1,0 +1,47 @@
+# Example past-investigation notes for this lab/course project. Illustrative,
+# not a real incident - hostnames/accounts reference the example inventory in
+# environment/hosts.yml.
+case_id: CASE-2026-0085
+title: LSASS access alert on WKSTN-4410 was Windows Defender, not credential dumping
+status: closed
+disposition: false_positive
+severity: low
+opened: 2026-06-19
+closed: 2026-06-19
+techniques:
+    - T1003.001
+hosts:
+    - WKSTN-4410
+accounts: []
+triggered_by:
+    - lsass_access_sysmon
+playbook_used: credential-theft
+summary: |
+    lsass_access_sysmon fired for a process opening lsass.exe with a
+    matching GrantedAccess mask on WKSTN-4410. Investigation found the
+    source process was MsMpEng.exe (Windows Defender), running from its
+    real-world install path under "C:\ProgramData\Microsoft\Windows
+    Defender\Platform\<version>\", performing a routine credential-theft
+    protection scan - not an attacker.
+timeline:
+    - timestamp: "2026-06-19T11:02:00Z"
+      event: lsass_access_sysmon fires for MsMpEng.exe -> lsass.exe on WKSTN-4410.
+    - timestamp: "2026-06-19T11:10:00Z"
+      event: Analyst confirms MsMpEng.exe is signed Microsoft binary, verifies via EDR that it ran its normal scheduled scan at that time, and finds no other suspicious activity on the host.
+    - timestamp: "2026-06-19T11:20:00Z"
+      event: Closed as false positive.
+findings:
+    - "lsass_access_sysmon's filter_main_known_tools already excludes MsMpEng.exe, but only when SourceImage starts with C:\\Windows\\System32\\ or C:\\Windows\\SysWOW64\\."
+    - "The real Windows Defender platform binary runs from C:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\<version>\\MsMpEng.exe, which the existing filter's path prefixes do not cover - so this specific, legitimate access pattern was never actually excluded."
+root_cause: >
+    Rule filter gap: filter_main_known_tools matches MsMpEng.exe only by
+    a System32/SysWOW64 path prefix, but Defender's actual installed
+    binary lives under ProgramData\Microsoft\Windows Defender\Platform\,
+    so it was never excluded in practice.
+remediation:
+    - "No live-fire changes made during triage; filed a rule-tuning follow-up to update lsass_access_sysmon.yml's filter to match MsMpEng.exe by SourceImage|endswith regardless of path (or add the ProgramData Defender path explicitly), consistent with the rule's existing falsepositives note about EDR/AV agents."
+lessons_learned:
+    - "Confirms the rule's own falsepositives entry (\"Legitimate administration tools and EDR/AV agents that inspect lsass.exe\") - the gap was in the filter's path assumption, not the underlying logic."
+    - "Path-prefix filters for well-known binaries should be checked against the binary's actual install location, not just the conventional System32 location."
+references:
+    - https://attack.mitre.org/techniques/T1003/001/

@@ -1,0 +1,60 @@
+# Example past-investigation notes for this lab/course project. Illustrative,
+# not a real incident - hostnames/accounts reference the example inventory in
+# environment/hosts.yml.
+case_id: CASE-2026-0072
+title: Password spraying against the VPN gateway compromises one stale service account
+status: closed
+disposition: true_positive
+severity: medium
+opened: 2026-05-02
+closed: 2026-05-02
+techniques:
+    - T1110.003
+hosts:
+    - VPN01
+accounts:
+    - svc-reporting (stale service account, later disabled)
+triggered_by: []
+detected_via: >
+    Manual SOC review of VPN authentication logs after an unrelated ticket
+    flagged a spike in failed logons - not caught automatically by any of
+    our rules/ at the time.
+playbook_used: password-spraying
+summary: |
+    An external source IP made low-and-slow authentication attempts
+    against the VPN gateway (VPN01) across ~40 distinct accounts over 6
+    hours, using a single common weak password - classic password
+    spraying. One stale, never-decommissioned service account
+    (svc-reporting) accepted the password. No further malicious activity
+    was observed from that account before it was disabled.
+timeline:
+    - timestamp: "2026-05-02T02:00:00Z"
+      event: Spray begins against VPN01 from a single external IP (~1 attempt per account per 10 minutes, evading naive lockout thresholds).
+    - timestamp: "2026-05-02T04:40:00Z"
+      event: svc-reporting authenticates successfully on the Nth attempt.
+    - timestamp: "2026-05-02T09:15:00Z"
+      event: SOC analyst notices the failed-logon spike while triaging an unrelated helpdesk ticket and pulls VPN01 auth logs.
+    - timestamp: "2026-05-02T09:40:00Z"
+      event: Pattern confirmed as password spraying; svc-reporting identified as the only successful account and disabled.
+    - timestamp: "2026-05-02T11:00:00Z"
+      event: Source IP blocked at the VPN gateway; case closed with no evidence of post-auth activity.
+findings:
+    - "Our password_spray_4688 rule (process-creation, EventID 4688) did not fire, because it only detects known spray *tooling* executed on a Windows host - this spray originated externally against the VPN identity provider and never touched an internal Windows process."
+    - "svc-reporting was a decommissioned reporting integration account that was disabled in name only; its password had never been rotated and had no MFA enrollment."
+    - "Account lockout policy allowed the slow-drip attempt rate to stay under the threshold."
+root_cause: >
+    A known detection gap - Hayabusa doesn't support the Sigma aggregation
+    conditions needed for a native failed-logon-threshold rule (see the
+    password_spray_4688.yml description), so external, tool-less spraying
+    against a non-Windows-process authentication surface (the VPN gateway)
+    had no automated detection. Combined with a stale, MFA-exempt service
+    account that should have been fully removed.
+remediation:
+    - Disabled and later deleted svc-reporting.
+    - Enforced MFA on all VPN authentication, including service accounts (moved remaining legitimate ones to certificate-based auth instead).
+    - Enabled smart-lockout / progressive delay on the VPN gateway.
+lessons_learned:
+    - "Confirmed detection gap: password_spray_4688 only covers on-host spray tooling, not externally-sourced spraying against an identity provider/VPN gateway - filed as a follow-up to build a SIEM-side (not Hayabusa-side) correlation rule for many-accounts-one-source VPN auth failures."
+    - "Stale service accounts need a hard deletion process, not just a password/disable step, to close this class of gap long-term."
+references:
+    - https://attack.mitre.org/techniques/T1110/003/

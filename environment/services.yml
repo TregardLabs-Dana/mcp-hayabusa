@@ -1,0 +1,48 @@
+# Example environment inventory for this lab/course project. Replace with
+# your real critical-service inventory - the entries below are
+# illustrative, not a real network. "hosts" references the "hostname"/
+# "hostname_pattern" values in hosts.yml.
+services:
+  - name: Active Directory Domain Services
+    hosts: [DC01, DC02]
+    criticality: critical
+    ports: ["389/tcp (LDAP)", "636/tcp (LDAPS)", "88/tcp (Kerberos)", "445/tcp (SMB)"]
+    owner: Identity/AD Team
+    description: >
+      Core directory service. DCSync, Kerberoasting, and AS-REP Roasting
+      activity against these hosts is always high priority regardless of
+      time of day - see the credential-theft playbook.
+
+  - name: File Shares (Finance, HR)
+    hosts: [FS01]
+    criticality: high
+    ports: ["445/tcp (SMB)"]
+    owner: IT Infrastructure
+    description: >
+      Contains sensitive Finance/HR data. Unusual admin-share access or
+      mass file access from an unexpected source should be investigated
+      as potential lateral movement or collection.
+
+  - name: Internal Mail
+    hosts: [MAIL01]
+    criticality: high
+    ports: ["443/tcp (OWA/EWS)", "25/tcp (SMTP)"]
+    owner: IT Infrastructure
+    description: Internal mail service; a common initial-access and exfiltration vector.
+
+  - name: Remote Administration (RDP)
+    hosts: [JUMP01]
+    criticality: high
+    ports: ["3389/tcp (RDP)"]
+    owner: IT Infrastructure
+    description: >
+      The only service that should originate interactive admin RDP
+      sessions to servers - RDP admin sessions to DC01/DC02/FS01/MAIL01
+      from any other source are anomalous.
+
+  - name: VPN / Remote Access Gateway
+    hosts: [VPN01]
+    criticality: high
+    ports: ["443/tcp"]
+    owner: IT Infrastructure
+    description: External entry point for remote employee access; a common target for password spraying and credential stuffing.

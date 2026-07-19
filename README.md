@@ -1,6 +1,6 @@
 # mcp-hayabusa
 
-An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa) for EVTX (Windows event log) analysis, exposing `scan_evtx` and `get_hayabusa_rules` tools to Claude. It also provides a small detection engineering knowledge base — a curated set of Sigma rules under `rules/`, browsable as `detection://` MCP resources and queryable via `analyze_coverage`, cross-referenced against MITRE ATT&CK technique data to report coverage — plus `suggest_rule` to turn an identified gap into a starter rule template, and a set of incident response playbooks under `playbooks/`, browsable via `detection://playbooks` and resolvable from an alert name via `detection://playbooks/by-alert/{alert_name}`.
+An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa) for EVTX (Windows event log) analysis, exposing `scan_evtx` and `get_hayabusa_rules` tools to Claude. It also provides a small detection engineering knowledge base — a curated set of Sigma rules under `rules/`, browsable as `detection://` MCP resources and queryable via `analyze_coverage`, cross-referenced against MITRE ATT&CK technique data to report coverage — plus `suggest_rule` to turn an identified gap into a starter rule template, a set of incident response playbooks under `playbooks/` (browsable via `detection://playbooks` and resolvable from an alert name via `detection://playbooks/by-alert/{alert_name}`), environment-specific knowledge under `environment/` (`detection://environment/hosts`, `/services`, `/baselines`) for judging whether a detection is consistent with normal operations, and past investigation notes under `investigations/` (`detection://investigations`, `/{case_id}`, `/by-technique/{tid}`).
 
 ## Setup
 
@@ -251,6 +251,64 @@ Finds the playbook(s) for a given alert. `alert_name` can be a short keyword (`"
 ```
 
 `match_type` is `"trigger_keyword"`, `"technique_overlap"`, or `null` if nothing matched either way (`playbooks` is then `[]`).
+
+### `detection://environment/hosts`, `detection://environment/services`, `detection://environment/baselines`
+
+Expose environment-specific knowledge from `./environment/` — an example inventory shipped with this repo (illustrative hostnames/IPs, not a real network) meant to be replaced with your actual environment. Each resource reads one YAML file and returns its list of entries as-is (no filtering/summarizing, since these are already small curated catalogs):
+
+- **`detection://environment/hosts`** (`environment/hosts.yml`) — known hosts and their roles, e.g. `{"hostname": "DC01", "role": "domain-controller", "criticality": "critical", "notes": "..."}`. A fleet can use `hostname_pattern` (e.g. `"WKSTN-*"`) instead of `hostname` to avoid one line per machine.
+- **`detection://environment/services`** (`environment/services.yml`) — critical services, the hosts they run on, ports, ownership, and criticality, e.g. Active Directory, file shares, mail.
+- **`detection://environment/baselines`** (`environment/baselines.yml`) — normal-vs-anomalous behavior per host role (or a specific hostname), e.g. "interactive logons to DC01/DC02 should only come from JUMP01" — useful for judging whether a detection is consistent with how the environment is expected to behave, or is a genuine outlier.
+
+```json
+{
+  "count": 5,
+  "baselines": [
+    {
+      "scope": "domain-controller",
+      "description": "Expected baseline behavior for DC01/DC02.",
+      "business_hours": "Mon-Fri 20:00-23:00 UTC (change window); otherwise no planned interactive activity",
+      "normal": [ "Interactive/RDP logons only from JUMP01, by Identity/AD Team admins.", "..." ],
+      "anomalous": [ "Any NTLM logon (EventID 4624 Type 3, AuthenticationPackageName NTLM) - see pass-the-hash playbook.", "..." ]
+    }
+  ]
+}
+```
+
+Each resource returns `{"error": "..."}` if `environment/` or the specific `.yml` file is missing, unreadable, or malformed (not a list under the expected top-level key).
+
+### `detection://investigations`, `detection://investigations/{case_id}`, `detection://investigations/by-technique/{tid}`
+
+Expose past investigation case notes from `./investigations/` — an example set of 4 closed cases shipped with this repo (illustrative, not real incidents), one YAML file per case, cross-referenced to the `environment/` inventory, `rules/`, and `playbooks/` used in this repo.
+
+- **`detection://investigations`** — lists every case, summarized (`case_id`, `title`, `status`, `disposition`, `severity`, `opened`, `closed`, `techniques`, `hosts`, first line of `summary`, `file`).
+- **`detection://investigations/{case_id}`** — one case's full notes plus raw YAML, looked up by case ID (e.g. `CASE-2026-0031` or `case-2026-0031`, case-insensitive — matched against the `.yml` filename stem). Full notes include `timeline`, `findings`, `root_cause`, `remediation`, and `lessons_learned`.
+- **`detection://investigations/by-technique/{tid}`** — lists cases whose `techniques` include a given ATT&CK ID, e.g. `T1003.006` (case-insensitive, with or without the leading `T` — same normalization as `detection://rules/by-technique/{technique_id}`).
+
+```json
+{
+  "count": 1,
+  "investigations": [
+    {
+      "case_id": "CASE-2026-0031",
+      "title": "DCSync detected against DC01 from over-privileged backup service account",
+      "status": "closed",
+      "disposition": "true_positive",
+      "severity": "critical",
+      "opened": "2026-03-04",
+      "closed": "2026-03-06",
+      "techniques": ["T1003.006"],
+      "hosts": ["DC01"],
+      "summary": "A directory replication request (EventID 4662, DS-Replication-Get-Changes",
+      "file": "case-2026-0031.yml"
+    }
+  ]
+}
+```
+
+One of the example cases (`CASE-2026-0085`) is a documented false positive — a real gap found in `lsass_access_sysmon.yml`'s filter (it excludes `MsMpEng.exe` only by a `System32`/`SysWOW64` path prefix, not Defender's actual `ProgramData\Microsoft\Windows Defender\Platform\...` install path) — and another (`CASE-2026-0072`) documents a confirmed detection gap (externally-sourced password spraying against a VPN gateway, which `password_spray_4688.yml` can't see since it only detects on-host spray tooling). Both illustrate how investigation notes are meant to feed back into rule tuning via `suggest_rule`/manual edits, not just record what happened.
+
+Returns `{"error": "..."}` for a missing `investigations/` directory, an unknown/invalid case ID, or a malformed case file.
 
 ## Tool: `analyze_coverage`
 

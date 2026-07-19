@@ -1,0 +1,59 @@
+# Example past-investigation notes for this lab/course project. Illustrative,
+# not a real incident - hostnames/accounts reference the example inventory in
+# environment/hosts.yml.
+case_id: CASE-2026-0058
+title: Pass-the-Hash from phished workstation to FS01 via shared local admin hash
+status: closed
+disposition: true_positive
+severity: high
+opened: 2026-04-11
+closed: 2026-04-12
+techniques:
+    - T1550.002
+    - T1021.002
+hosts:
+    - WKSTN-2214
+    - FS01
+accounts:
+    - local Administrator (shared local admin password, pre-LAPS)
+triggered_by:
+    - pth_logon_4624
+    - pth_admin_share
+playbook_used: pass-the-hash
+summary: |
+    An NTLM network logon (4624, Type 3, NtLmSsp) from WKSTN-2214 to FS01
+    was immediately followed by ADMIN$ access (5140) from the same source,
+    matching both pth_logon_4624 and pth_admin_share. Traced back to
+    WKSTN-2214 being compromised the prior day via a phishing attachment
+    that dropped a credential-dumping tool; the captured local
+    Administrator hash was valid on FS01 because the local admin password
+    was shared fleet-wide at the time.
+timeline:
+    - timestamp: "2026-04-11T09:47:00Z"
+      event: User on WKSTN-2214 opens a malicious attachment (identified in retrospect via EDR telemetry).
+    - timestamp: "2026-04-11T10:15:00Z"
+      event: Credential-dumping tool executed on WKSTN-2214; local Administrator NTLM hash captured.
+    - timestamp: "2026-04-12T08:03:00Z"
+      event: pth_logon_4624 and pth_admin_share both fire for an NTLM logon + ADMIN$ access from WKSTN-2214 to FS01.
+    - timestamp: "2026-04-12T08:20:00Z"
+      event: WKSTN-2214 isolated per pass-the-hash playbook containment step.
+    - timestamp: "2026-04-12T14:00:00Z"
+      event: WKSTN-2214 reimaged; shared local admin password rotated fleet-wide as an emergency measure.
+findings:
+    - "The fleet-wide shared local Administrator password meant one compromised endpoint could authenticate as local admin anywhere."
+    - "No evidence of further lateral movement beyond FS01 (no other 4624/5140 hits for the same source in the incident window)."
+    - "No data exfiltration confirmed from FS01 shares in the available window."
+root_cause: >
+    Phishing-delivered credential theft on a single endpoint, made
+    high-impact by fleet-wide local admin password reuse (no LAPS or
+    equivalent unique-per-host local admin credentials at the time).
+remediation:
+    - Isolated and reimaged WKSTN-2214; reset the affected user's domain credentials.
+    - Emergency fleet-wide local admin password rotation.
+    - Accelerated an already-planned LAPS rollout to eliminate shared local admin credentials.
+lessons_learned:
+    - "Shared local admin passwords turn a single-endpoint compromise into a lateral-movement primitive almost for free - this was the deciding factor that got LAPS prioritized."
+    - "The pass-the-hash playbook's two-signal detection (logon + admin-share access) gave high-confidence triage with no false-positive investigation overhead."
+references:
+    - https://attack.mitre.org/techniques/T1550/002/
+    - https://attack.mitre.org/techniques/T1021/002/
