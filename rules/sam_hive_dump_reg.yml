@@ -19,6 +19,8 @@ modified: 2026-07-18
 tags:
     - attack.credential-access
     - attack.t1003.002
+    - attack.t1003.004
+    - attack.t1003.005
 logsource:
     category: process_creation
     product: windows
