@@ -25,6 +25,9 @@ DETECTION_RULES_DIR = PROJECT_ROOT / "rules"
 RULE_NAME_RE = re.compile(r"[A-Za-z0-9_\-]+")
 TECHNIQUE_ID_RE = re.compile(r"t?\d{4}(\.\d{3})?", re.IGNORECASE)
 
+# Curated incident response playbooks (YAML), one per alert family.
+PLAYBOOKS_DIR = PROJECT_ROOT / "playbooks"
+
 # Local cache of MITRE ATT&CK technique metadata, built by download_attack_data.py.
 ATTACK_TECHNIQUES_PATH = PROJECT_ROOT / "mappings" / "attack_techniques.json"
 
@@ -473,6 +476,136 @@ def get_attack_technique(technique_id: str) -> dict:
         rules/, regardless of whether that cache exists.
     """
     return _technique_report(technique_id)
+
+
+def _iter_playbooks():
+    """Yield (path, parsed playbook) for every valid playbook in PLAYBOOKS_DIR."""
+    for pb_path in sorted(PLAYBOOKS_DIR.glob("*.yml")):
+        try:
+            playbook = yaml.safe_load(pb_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(playbook, dict) and playbook.get("name"):
+            yield pb_path, playbook
+
+
+def _playbook_summary(playbook: dict, pb_path: Path, base_dir: Path) -> dict:
+    description = playbook.get("description")
+    return {
+        "id": playbook.get("id", pb_path.stem),
+        "name": playbook.get("name"),
+        "severity": playbook.get("severity"),
+        "description": description.strip().splitlines()[0] if description else None,
+        "techniques": playbook.get("techniques") or [],
+        "triggers": playbook.get("triggers") or [],
+        "file": str(pb_path.relative_to(base_dir)),
+    }
+
+
+def _rule_technique_ids(rule: dict) -> set[str]:
+    """Extract normalized ATT&CK technique IDs (e.g. "T1003.001") from a
+    rule's "attack.tNNNN[.NNN]" tags."""
+    ids = set()
+    for tag in rule.get("tags") or []:
+        tag = str(tag).lower()
+        if not tag.startswith("attack."):
+            continue
+        candidate = tag[len("attack."):]
+        if TECHNIQUE_ID_RE.fullmatch(candidate):
+            ids.add("T" + candidate.upper().lstrip("T"))
+    return ids
+
+
+def _playbook_technique_ids(playbook: dict) -> set[str]:
+    return {"T" + str(t).upper().lstrip("T") for t in (playbook.get("techniques") or [])}
+
+
+def _find_playbooks_by_alert(alert_name: str) -> tuple[list[dict], str | None]:
+    """Match an alert name (a rule title, a rule filename stem, or a bare
+    keyword) to playbook(s). First tries each playbook's own "triggers"
+    keyword list (substring match, either direction); if nothing matches
+    that way, falls back to resolving alert_name against our curated
+    rules/ by title/filename substring and matching on shared ATT&CK
+    technique IDs - this lets a full Hayabusa scan_evtx RuleTitle resolve
+    to a playbook even if it isn't listed verbatim in any "triggers" list.
+    """
+    needle = alert_name.lower().strip()
+    playbooks = list(_iter_playbooks())
+
+    direct = []
+    for pb_path, playbook in playbooks:
+        triggers = [str(t).lower() for t in (playbook.get("triggers") or [])]
+        if any(t and (needle in t or t in needle) for t in triggers):
+            direct.append(_playbook_summary(playbook, pb_path, PLAYBOOKS_DIR))
+    if direct:
+        return direct, "trigger_keyword"
+
+    matching_technique_ids = set()
+    for rule_path, rule in _iter_detection_rules():
+        haystack = f"{rule.get('title', '')} {rule_path.stem}".lower()
+        if needle in haystack:
+            matching_technique_ids |= _rule_technique_ids(rule)
+    if not matching_technique_ids:
+        return [], None
+
+    technique_matches = [
+        _playbook_summary(playbook, pb_path, PLAYBOOKS_DIR)
+        for pb_path, playbook in playbooks
+        if matching_technique_ids & _playbook_technique_ids(playbook)
+    ]
+    return technique_matches, "technique_overlap" if technique_matches else None
+
+
+@mcp.resource("detection://playbooks")
+def list_playbooks() -> dict:
+    """List all incident response playbooks in the knowledge base
+    (playbooks/ directory)."""
+    if not PLAYBOOKS_DIR.exists():
+        return {"error": f"Playbooks directory not found at {PLAYBOOKS_DIR}"}
+
+    playbooks = [_playbook_summary(playbook, pb_path, PLAYBOOKS_DIR) for pb_path, playbook in _iter_playbooks()]
+    return {"count": len(playbooks), "playbooks": playbooks}
+
+
+@mcp.resource("detection://playbooks/{playbook_name}")
+def get_playbook(playbook_name: str) -> dict:
+    """Get a specific incident response playbook's full content by name (the
+    .yml filename in playbooks/, without the extension - use the "id" field
+    from detection://playbooks)."""
+    if not RULE_NAME_RE.fullmatch(playbook_name):
+        return {"error": f"Invalid playbook name '{playbook_name}'"}
+
+    pb_path = PLAYBOOKS_DIR / f"{playbook_name}.yml"
+    if not pb_path.exists():
+        return {"error": f"Playbook '{playbook_name}' not found in {PLAYBOOKS_DIR}"}
+
+    try:
+        raw = pb_path.read_text(encoding="utf-8")
+        playbook = yaml.safe_load(raw)
+    except (OSError, yaml.YAMLError) as exc:
+        return {"error": f"Failed to read playbook '{playbook_name}': {exc}"}
+
+    return {"name": playbook_name, "file": pb_path.name, "playbook": playbook, "raw": raw}
+
+
+@mcp.resource("detection://playbooks/by-alert/{alert_name}")
+def get_playbooks_by_alert(alert_name: str) -> dict:
+    """Find incident response playbook(s) for a given alert. alert_name can
+    be a short keyword (e.g. "DCSync"), or a full rule title as it appears
+    in scan_evtx/get_hayabusa_rules output (e.g. "Active Directory
+    Replication Rights Abuse (DCSync)") - matched first against each
+    playbook's "triggers" list, then, if nothing matches, against ATT&CK
+    technique overlap with our curated rules/."""
+    if not PLAYBOOKS_DIR.exists():
+        return {"error": f"Playbooks directory not found at {PLAYBOOKS_DIR}"}
+
+    matches, match_type = _find_playbooks_by_alert(alert_name)
+    return {
+        "alert_name": alert_name,
+        "match_type": match_type,
+        "count": len(matches),
+        "playbooks": matches,
+    }
 
 
 @mcp.tool()

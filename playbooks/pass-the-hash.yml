@@ -1,0 +1,38 @@
+id: pass-the-hash
+name: Pass-the-Hash Lateral Movement Response
+severity: high
+description: |
+    Response procedure for detections indicating an NTLM hash was replayed
+    to authenticate and move laterally (Pass-the-Hash) - a suspicious NTLM
+    network logon, optionally followed by administrative share access, that
+    is not backed by an interactive session or Kerberos pre-authentication
+    on the target.
+techniques:
+    - T1550.002
+    - T1021.002
+triggers:
+    - Pass-the-Hash
+    - Pass the Hash
+    - PtH
+    - NTLM Logon
+    - Administrative Share
+phases:
+    triage:
+        - "Identify the account, source workstation/IP, and target host from the logon event (4624 Type 3, AuthenticationPackageName NTLM)."
+        - "Check whether an administrative share (ADMIN$, C$, IPC$) was subsequently accessed (5140) from the same source - this raises confidence of active lateral movement rather than a benign legacy NTLM logon."
+        - "Determine whether the source workstation is the account's normal workstation; an NTLM logon from an unfamiliar host for a normally-Kerberos account is a strong indicator."
+    containment:
+        - "Isolate the source host - it is the most likely point where the hash was originally captured or is being replayed from."
+        - "Disable or reset the credentials for the account that authenticated, since its NTLM hash should be considered compromised."
+        - "Restrict the account's ability to authenticate to other hosts (e.g. via the Protected Users group or targeted logon restrictions) while investigating scope."
+    eradication:
+        - "Identify and remove the tooling used to capture/replay the hash (Mimikatz sekurlsa::pth, Impacket wmiexec/psexec, CrackMapExec, etc.) from the source host."
+        - "Reset the compromised account's password - this invalidates the stolen NTLM hash."
+        - "Review and remove any unauthorized local admin group membership or scheduled tasks/services created via the lateral movement."
+    recovery:
+        - "Verify no further hosts were accessed with the compromised account by reviewing 4624/5140 activity for that account across the environment during the incident window."
+        - "Re-enable the account only after credentials are rotated and the source host is verified clean or reimaged."
+        - "Consider enabling Credential Guard or restricting NTLM where feasible to reduce future exposure to this technique."
+references:
+    - https://attack.mitre.org/techniques/T1550/002/
+    - https://attack.mitre.org/techniques/T1021/002/

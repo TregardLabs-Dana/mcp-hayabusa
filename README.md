@@ -1,6 +1,6 @@
 # mcp-hayabusa
 
-An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa) for EVTX (Windows event log) analysis, exposing `scan_evtx` and `get_hayabusa_rules` tools to Claude. It also provides a small detection engineering knowledge base — a curated set of Sigma rules under `rules/`, browsable as `detection://` MCP resources and queryable via `analyze_coverage`, cross-referenced against MITRE ATT&CK technique data to report coverage — plus `suggest_rule` to turn an identified gap into a starter rule template.
+An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa) for EVTX (Windows event log) analysis, exposing `scan_evtx` and `get_hayabusa_rules` tools to Claude. It also provides a small detection engineering knowledge base — a curated set of Sigma rules under `rules/`, browsable as `detection://` MCP resources and queryable via `analyze_coverage`, cross-referenced against MITRE ATT&CK technique data to report coverage — plus `suggest_rule` to turn an identified gap into a starter rule template, and a set of incident response playbooks under `playbooks/`, browsable via `detection://playbooks` and resolvable from an alert name via `detection://playbooks/by-alert/{alert_name}`.
 
 ## Setup
 
@@ -119,7 +119,7 @@ Lists every rule in `./rules/`.
 
 ```json
 {
-  "count": 6,
+  "count": 8,
   "rules": [
     {
       "name": "lsass_access_sysmon",
@@ -185,6 +185,72 @@ Combines MITRE ATT&CK technique metadata with our rule coverage for that techniq
 - `"gap"` — no rules reference this technique at all
 
 If the ATT&CK cache hasn't been downloaded, or the technique ID isn't found in it, `name`/`description`/`tactics`/`url` come back `null` and a `note` field explains why — `coverage`/`rules` are still populated either way.
+
+### `detection://playbooks`
+
+Lists all incident response playbooks in `./playbooks/` — a small curated set covering the alert families our `./rules/` currently detect (credential theft, pass-the-hash, password spraying).
+
+```json
+{
+  "count": 3,
+  "playbooks": [
+    {
+      "id": "credential-theft",
+      "name": "Credential Theft Response",
+      "severity": "critical",
+      "description": "Response procedure for detections indicating credential material was...",
+      "techniques": ["T1003.001", "T1003.006", "T1218.011", "T1558.003", "T1558.004"],
+      "triggers": ["LSASS", "DCSync", "Kerberoast", "AS-REP", "comsvcs", "..."],
+      "file": "credential-theft.yml"
+    }
+  ]
+}
+```
+
+### `detection://playbooks/{playbook_name}`
+
+Returns one playbook's full parsed content plus its raw YAML. `playbook_name` is the filename stem (the `id`/`file` from `detection://playbooks`), e.g. `detection://playbooks/pass-the-hash`. Each playbook has `triage`/`containment`/`eradication`/`recovery` phases, each a list of concrete steps.
+
+```json
+{
+  "name": "pass-the-hash",
+  "file": "pass-the-hash.yml",
+  "playbook": {
+    "id": "pass-the-hash",
+    "name": "Pass-the-Hash Lateral Movement Response",
+    "severity": "high",
+    "techniques": ["T1550.002", "T1021.002"],
+    "phases": {
+      "triage": ["Identify the account, source workstation/IP, and target host from the logon event (4624 Type 3, AuthenticationPackageName NTLM).", "..."],
+      "containment": ["..."],
+      "eradication": ["..."],
+      "recovery": ["..."]
+    },
+    "references": ["https://attack.mitre.org/techniques/T1550/002/"]
+  },
+  "raw": "id: pass-the-hash\nname: Pass-the-Hash Lateral Movement Response\n..."
+}
+```
+
+Returns `{"error": "..."}` for an unknown or invalid playbook name.
+
+### `detection://playbooks/by-alert/{alert_name}`
+
+Finds the playbook(s) for a given alert. `alert_name` can be a short keyword (`"DCSync"`) or a full rule title as it appears in `scan_evtx`/`get_hayabusa_rules` output (`"Active Directory Replication Rights Abuse (DCSync)"`). Matching happens in two passes:
+
+1. **Trigger keyword** — case-insensitive substring match (either direction) against each playbook's `triggers` list.
+2. **Technique overlap** (fallback, only tried if step 1 finds nothing) — resolves `alert_name` against our curated `rules/` by title/filename substring, then matches on shared ATT&CK technique IDs with each playbook's `techniques` list. This lets an alert title that isn't in any `triggers` list still resolve correctly, as long as it maps to one of our curated rules.
+
+```json
+{
+  "alert_name": "DCSync",
+  "match_type": "trigger_keyword",
+  "count": 1,
+  "playbooks": [ { "id": "credential-theft", "...": "..." } ]
+}
+```
+
+`match_type` is `"trigger_keyword"`, `"technique_overlap"`, or `null` if nothing matched either way (`playbooks` is then `[]`).
 
 ## Tool: `analyze_coverage`
 
