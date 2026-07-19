@@ -1,0 +1,66 @@
+title: Credential Theft via Registry Hive Dump (SAM/SYSTEM/SECURITY)
+id: 5dd62bb7-529a-47b4-a1ab-8b6d8ff0eb17
+status: stable
+description: |
+    Detects use of the built-in reg.exe utility to save a copy of the SAM,
+    SYSTEM, or SECURITY registry hives to disk - a living-off-the-land
+    technique for offline extraction of local account NTLM hashes (SAM),
+    the boot key needed to decrypt them (SYSTEM), and cached domain
+    credentials / LSA secrets such as service account passwords
+    (SECURITY). Commonly followed by exfiltration and offline cracking
+    with tools like secretsdump.py or Mimikatz's `lsadump::sam`.
+references:
+    - https://attack.mitre.org/techniques/T1003/002/
+    - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/process_creation/proc_creation_win_registry_hive_dumping.yml
+author: detection-engineering-lab
+date: 2026-07-18
+modified: 2026-07-18
+tags:
+    - attack.credential-access
+    - attack.t1003.002
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection_img:
+        Image|endswith: '\reg.exe'
+    selection_cli:
+        CommandLine|contains: 'save'
+    selection_hive:
+        CommandLine|contains:
+            - 'hklm\sam'
+            - 'hklm\system'
+            - 'hklm\security'
+    condition: selection_img and selection_cli and selection_hive
+falsepositives:
+    - Legitimate registry backup steps in documented IT support or troubleshooting scripts
+    - Backup software that snapshots registry hives as part of a full system backup
+level: high
+severity_justification: >
+    High, not critical, because unlike DCSync this yields local-account
+    material scoped to a single host (plus SYSTEM/SECURITY needed to
+    decrypt it), not domain-wide credentials - but the near-zero
+    legitimate-use rate and the fact that a reused local admin password
+    (no LAPS) turns this into a lateral-movement foothold across many
+    hosts still warrants high rather than medium.
+test_cases:
+    - description: reg.exe saving the SAM hive to disk
+      should_match: true
+      log:
+          Image: 'C:\Windows\System32\reg.exe'
+          CommandLine: 'reg.exe save hklm\sam C:\Windows\Temp\sam.save'
+    - description: reg.exe saving the SYSTEM hive to disk
+      should_match: true
+      log:
+          Image: 'C:\Windows\System32\reg.exe'
+          CommandLine: 'reg save hklm\system C:\Windows\Temp\system.save'
+    - description: reg.exe querying an unrelated key (no save, no hive)
+      should_match: false
+      log:
+          Image: 'C:\Windows\System32\reg.exe'
+          CommandLine: 'reg.exe query hklm\software\microsoft\windows\currentversion'
+    - description: reg.exe save of an unrelated key, not SAM/SYSTEM/SECURITY
+      should_match: false
+      log:
+          Image: 'C:\Windows\System32\reg.exe'
+          CommandLine: 'reg.exe save hklm\software\myapp C:\Temp\myapp.save'
