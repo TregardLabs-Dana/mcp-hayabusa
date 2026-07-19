@@ -1,6 +1,6 @@
 # mcp-hayabusa
 
-An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa) for EVTX (Windows event log) analysis, exposing `scan_evtx` and `get_hayabusa_rules` tools to Claude. It also provides a small detection engineering knowledge base — a curated set of Sigma rules under `rules/`, browsable as `detection://` MCP resources, cross-referenced against MITRE ATT&CK technique data to report coverage.
+An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa) for EVTX (Windows event log) analysis, exposing `scan_evtx` and `get_hayabusa_rules` tools to Claude. It also provides a small detection engineering knowledge base — a curated set of Sigma rules under `rules/`, browsable as `detection://` MCP resources and queryable via `analyze_coverage`, cross-referenced against MITRE ATT&CK technique data to report coverage — plus `suggest_rule` to turn an identified gap into a starter rule template.
 
 ## Setup
 
@@ -185,6 +185,86 @@ Combines MITRE ATT&CK technique metadata with our rule coverage for that techniq
 - `"gap"` — no rules reference this technique at all
 
 If the ATT&CK cache hasn't been downloaded, or the technique ID isn't found in it, `name`/`description`/`tactics`/`url` come back `null` and a `note` field explains why — `coverage`/`rules` are still populated either way.
+
+## Tool: `analyze_coverage`
+
+Analyzes our `./rules/` coverage for either a single ATT&CK technique or an entire tactic, using the ATT&CK cache to know which techniques exist. For a technique ID this returns the same shape as `detection://attack/techniques/{technique_id}` (it's built on the same helper). For a tactic name it walks every technique MITRE assigns to that tactic and classifies each `covered`/`partial`/`gap`, so gaps in the ruleset are visible without checking techniques one at a time.
+
+**Parameters:**
+- `target` (string, required) — either a technique ID (`T1003.001`, `t1558.003`, `1003.006` are equivalent) or a tactic name (`credential-access`, `Lateral Movement`, `lateral_movement` are equivalent — matched case-insensitively, spaces/underscores treated as hyphens)
+
+**Returns (technique query):**
+```json
+{
+  "query_type": "technique",
+  "technique_id": "T1003.006",
+  "coverage": "covered",
+  "rules": [ { "name": "dcsync_4662", "...": "..." } ],
+  "name": "DCSync",
+  "description": "...",
+  "tactics": ["credential-access"],
+  "url": "https://attack.mitre.org/techniques/T1003/006"
+}
+```
+
+**Returns (tactic query):**
+```json
+{
+  "query_type": "tactic",
+  "tactic": "credential-access",
+  "total_techniques": 67,
+  "covered_count": 3,
+  "partial_count": 0,
+  "gap_count": 64,
+  "covered": [
+    { "technique_id": "T1003.001", "name": "LSASS Memory", "is_subtechnique": true,
+      "rules": [ { "name": "lsass_access_sysmon", "title": "...", "status": "stable" } ] }
+  ],
+  "partial": [],
+  "gaps": [
+    { "technique_id": "T1552.004", "name": "Private Keys", "is_subtechnique": true }
+  ]
+}
+```
+
+Requires the ATT&CK cache from `download_attack_data.py` — without it, a technique query still returns `coverage`/`rules` (with `name`/`description` `null`, same as the resource), but a tactic query returns `{"error": "..."}` since it has no way to enumerate that tactic's techniques. An unrecognized tactic name returns `{"error": "...", "known_tactics": [...]}` listing the valid tactic names.
+
+## Tool: `suggest_rule`
+
+Checks a single ATT&CK technique's coverage (same lookup as `analyze_coverage`/`detection://attack/techniques/{technique_id}`) and, if it's a genuine gap, suggests where to start looking and can write a starter Sigma template to `./rules/`.
+
+**Parameters:**
+- `technique_id` (string, required) — e.g. `T1110.003` (case-insensitive, with or without the leading `T`)
+- `create_rule` (boolean, optional, default `false`) — if `true` and the technique is a gap, writes a starter `.yml` template to `./rules/`
+- `rule_name` (string, optional) — filename stem for the created template. Defaults to `template_t<id_with_underscores>`, e.g. `template_t1110_003`
+
+**Returns (gap, no creation):**
+```json
+{
+  "technique_id": "T1552.004",
+  "coverage": "gap",
+  "existing_rules": [],
+  "name": "Private Keys",
+  "tactics": ["credential-access"],
+  "suggestion": {
+    "tactics_used": ["credential-access"],
+    "suggested_logsource": { "product": "windows", "service": "security" },
+    "suggested_signals": [
+      "Security EventID 4624/4625 (logon), 4768/4769 (Kerberos TGT/TGS), 4662 (directory service access), 4776 (NTLM validation)",
+      "Sysmon EventID 10 (ProcessAccess) if the technique targets LSASS or another credential store process"
+    ],
+    "guidance": "Identify the specific Windows or Sysmon event that captures Private Keys activity, then narrow the selection to field values unique to this technique rather than the tactic in general."
+  },
+  "template_created": false,
+  "template_note": "Pass create_rule=True to write a starter rule template to rules/."
+}
+```
+
+The `suggestion` is a coarse, tactic-level starting point (which log source and event types to look at first) drawn from a small built-in table (`TACTIC_DETECTION_HINTS` in `server.py`) covering all 14 MITRE Enterprise tactics — it is not technique-specific detection logic, since that requires knowing the technique's actual artifacts (specific command lines, registry keys, API calls, etc.), which isn't something this server can derive automatically.
+
+With `create_rule=true`, the response additionally includes `"template_created": true`, `"template_path"`, and the generated YAML as `"template_raw"`. The template has a real `id` (freshly generated UUID), `status: experimental`, ATT&CK-derived `tags`/`references`, and a suggested `logsource`, but its `detection:` block is a placeholder (`EventID: 0`) marked `# TODO` — it's meant to be hand-edited, not scanned as-is.
+
+If the technique already has `partial` or `covered` coverage, `suggestion` is `null` and no template is created (even with `create_rule=true`) — the response points at the `existing_rules` to improve instead, so gap-filling doesn't create redundant or conflicting rules for a technique that already has one. Coverage is re-derived live each call, so once a suggested template (or a hand-written rule) exists, a later `suggest_rule`/`analyze_coverage` call for the same technique reports `partial` instead of `gap`.
 
 ## Requirements
 

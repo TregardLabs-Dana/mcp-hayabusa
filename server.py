@@ -1,8 +1,10 @@
+import datetime
 import json
 import os
 import re
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 import yaml
@@ -21,6 +23,7 @@ RULES_CONFIG_DIR = RULES_DIR / "config"
 # used for scanning.
 DETECTION_RULES_DIR = PROJECT_ROOT / "rules"
 RULE_NAME_RE = re.compile(r"[A-Za-z0-9_\-]+")
+TECHNIQUE_ID_RE = re.compile(r"t?\d{4}(\.\d{3})?", re.IGNORECASE)
 
 # Local cache of MITRE ATT&CK technique metadata, built by download_attack_data.py.
 ATTACK_TECHNIQUES_PATH = PROJECT_ROOT / "mappings" / "attack_techniques.json"
@@ -34,6 +37,91 @@ VALID_OUTPUT_FORMATS = ["summary", "full"]
 SUMMARY_FIELDS = ["Timestamp", "RuleTitle", "Level", "Computer", "Channel", "EventID", "RecordID"]
 
 SCAN_TIMEOUT_SECONDS = 300
+
+# Coarse starting points for suggest_rule: per MITRE ATT&CK Enterprise
+# tactic, a typical Windows/Sysmon log source and the event types worth
+# looking at first. These are generic to the tactic, not the technique -
+# real detection logic still requires looking at the technique's specific
+# artifacts (command-line patterns, registry keys, API calls, etc.).
+TACTIC_DETECTION_HINTS = {
+    "reconnaissance": {
+        "logsource": {"product": "windows", "category": "process_creation"},
+        "signals": ["Sysmon/Security EventID 1/4688 (process creation) for recon commands (whoami, nltest, net, nslookup)"],
+    },
+    "resource-development": {
+        "logsource": {"product": "windows", "category": "process_creation"},
+        "signals": ["Usually off-host (infrastructure setup); on-host evidence is rare - focus on delivered payloads instead"],
+    },
+    "initial-access": {
+        "logsource": {"product": "windows", "service": "security"},
+        "signals": [
+            "Security EventID 4624/4625 (logon success/failure) for the entry vector",
+            "Sysmon EventID 1 (process creation) for the spawned payload; EventID 3 for the inbound connection",
+        ],
+    },
+    "execution": {
+        "logsource": {"product": "windows", "category": "process_creation"},
+        "signals": [
+            "Sysmon/Security EventID 1/4688 (process creation) for the interpreter/binary and its command line",
+            "Sysmon EventID 7 (image load) if a script host or LOLBin is abused",
+        ],
+    },
+    "persistence": {
+        "logsource": {"product": "windows", "service": "security"},
+        "signals": [
+            "Sysmon EventID 12/13/14 (registry) for Run keys/services; Security EventID 4698/4702 (scheduled tasks)",
+            "Security EventID 7045 (new service installed)",
+        ],
+    },
+    "privilege-escalation": {
+        "logsource": {"product": "windows", "service": "security"},
+        "signals": [
+            "Security EventID 4672 (special privileges assigned to new logon), 4673 (privileged service called)",
+            "Sysmon EventID 1 (process creation) for token manipulation / UAC bypass tooling",
+        ],
+    },
+    "defense-evasion": {
+        "logsource": {"product": "windows", "category": "process_creation"},
+        "signals": [
+            "Sysmon EventID 1 (process creation) for obfuscated/renamed binaries; EventID 4 (Sysmon config change)",
+            "Security EventID 4688/1102 (audit log cleared) or Windows Defender EventIDs for tampering",
+        ],
+    },
+    "credential-access": {
+        "logsource": {"product": "windows", "service": "security"},
+        "signals": [
+            "Security EventID 4624/4625 (logon), 4768/4769 (Kerberos TGT/TGS), 4662 (directory service access), 4776 (NTLM validation)",
+            "Sysmon EventID 10 (ProcessAccess) if the technique targets LSASS or another credential store process",
+        ],
+    },
+    "discovery": {
+        "logsource": {"product": "windows", "category": "process_creation"},
+        "signals": ["Sysmon/Security EventID 1/4688 (process creation) for enumeration commands and their arguments"],
+    },
+    "lateral-movement": {
+        "logsource": {"product": "windows", "service": "security"},
+        "signals": [
+            "Security EventID 4624 (logon, esp. Type 3/10), 4648 (explicit credential logon), 5140/5145 (share/file access)",
+            "Sysmon EventID 3 (network connection) for SMB/WinRM/WMI/RDP traffic",
+        ],
+    },
+    "collection": {
+        "logsource": {"product": "windows", "category": "file_event"},
+        "signals": ["Sysmon EventID 11 (file create) for staged data; EventID 1 for archiving/collection tool execution"],
+    },
+    "command-and-control": {
+        "logsource": {"product": "windows", "category": "network_connection"},
+        "signals": ["Sysmon EventID 3 (network connection) and EventID 22 (DNS query) for beacon traffic"],
+    },
+    "exfiltration": {
+        "logsource": {"product": "windows", "category": "network_connection"},
+        "signals": ["Sysmon EventID 3 (network connection) for outbound transfer; EventID 11 (file create) for staged archives"],
+    },
+    "impact": {
+        "logsource": {"product": "windows", "service": "security"},
+        "signals": ["Security EventID 4657/4663 (object modified/deleted), 1102 (audit log cleared); Sysmon EventID 23 (file delete)"],
+    },
+}
 
 
 @mcp.tool()
@@ -282,6 +370,52 @@ def _assess_coverage(rules: list[dict]) -> str:
     return "partial"
 
 
+def _normalize_tactic(tactic: str) -> str:
+    """Normalize e.g. "Credential Access" or "credential_access" to the
+    "credential-access" form used both in ATT&CK's kill_chain_phases data
+    and in a Sigma rule's "attack.<tactic>" tags."""
+    return re.sub(r"[\s_]+", "-", tactic.strip().lower())
+
+
+def _technique_report(technique_id: str) -> dict:
+    """Build a single technique's coverage report: our rule coverage
+    (always computed live from rules/) plus ATT&CK metadata (name,
+    description, tactics) from the local cache, if available."""
+    normalized_id = "T" + technique_id.upper().lstrip("T")
+
+    rules = _find_rules_by_technique(technique_id)
+    result = {
+        "technique_id": normalized_id,
+        "coverage": _assess_coverage(rules),
+        "rules": rules,
+    }
+
+    techniques = _load_attack_techniques()
+    if not techniques:
+        result["name"] = None
+        result["description"] = None
+        result["attack_data_available"] = False
+        result["note"] = (
+            f"ATT&CK technique metadata not found at {ATTACK_TECHNIQUES_PATH}. "
+            f"Run download_attack_data.py to fetch it."
+        )
+        return result
+
+    technique = techniques.get(normalized_id)
+    if technique is None:
+        result["name"] = None
+        result["description"] = None
+        result["attack_data_available"] = True
+        result["note"] = f"'{normalized_id}' was not found in the cached ATT&CK data."
+        return result
+
+    result["name"] = technique.get("name")
+    result["description"] = technique.get("description")
+    result["tactics"] = technique.get("tactics")
+    result["url"] = technique.get("url")
+    return result
+
+
 @mcp.resource("detection://rules")
 def list_detection_rules() -> dict:
     """List all Sigma detection rules in the knowledge base (rules/ directory)."""
@@ -338,38 +472,260 @@ def get_attack_technique(technique_id: str) -> dict:
         is always computed live from the "attack.tNNNN.NNN" tags on rules in
         rules/, regardless of whether that cache exists.
     """
-    normalized_id = "T" + technique_id.upper().lstrip("T")
+    return _technique_report(technique_id)
 
-    rules = _find_rules_by_technique(technique_id)
-    result = {
-        "technique_id": normalized_id,
-        "coverage": _assess_coverage(rules),
-        "rules": rules,
-    }
+
+@mcp.tool()
+def analyze_coverage(target: str) -> dict:
+    """Analyze our Sigma rule detection coverage (rules/) for an ATT&CK
+    technique ID or a whole tactic, using the cached ATT&CK technique data
+    (mappings/attack_techniques.json) to identify gaps.
+
+    target: either a technique ID, e.g. "T1003.001" or "1558.003"
+        (case-insensitive, with or without the leading "T"), or a tactic
+        name, e.g. "credential-access" or "Lateral Movement"
+        (case-insensitive; spaces/underscores are treated as hyphens).
+
+    For a technique ID, returns that technique's coverage: "covered" (a
+    matching rule has graduated to status: stable), "partial" (matching
+    rules exist but are all still experimental), or "gap" (no matching
+    rules), plus ATT&CK metadata if the cache is available.
+
+    For a tactic name, returns every technique MITRE assigns to that
+    tactic, each classified covered/partial/gap the same way, with summary
+    counts - run download_attack_data.py first if the cache is missing.
+    """
+    target = target.strip()
+    if not target:
+        return {"error": "target must not be empty"}
+
+    if TECHNIQUE_ID_RE.fullmatch(target):
+        return {"query_type": "technique", **_technique_report(target)}
 
     techniques = _load_attack_techniques()
     if not techniques:
-        result["name"] = None
-        result["description"] = None
-        result["attack_data_available"] = False
-        result["note"] = (
-            f"ATT&CK technique metadata not found at {ATTACK_TECHNIQUES_PATH}. "
-            f"Run download_attack_data.py to fetch it."
+        return {
+            "error": (
+                f"ATT&CK technique metadata not found at {ATTACK_TECHNIQUES_PATH}. "
+                f"Run download_attack_data.py to fetch it, then retry."
+            )
+        }
+
+    tactic = _normalize_tactic(target)
+    matching = [t for t in techniques.values() if tactic in (t.get("tactics") or [])]
+    if not matching:
+        known_tactics = sorted(
+            {phase for tech in techniques.values() for phase in (tech.get("tactics") or [])}
+        )
+        return {
+            "error": f"No ATT&CK techniques found for tactic '{tactic}'.",
+            "known_tactics": known_tactics,
+        }
+
+    covered, partial, gaps = [], [], []
+    for tech in sorted(matching, key=lambda t: t["id"]):
+        rules = _find_rules_by_technique(tech["id"])
+        status = _assess_coverage(rules)
+        entry = {
+            "technique_id": tech["id"],
+            "name": tech.get("name"),
+            "is_subtechnique": tech.get("is_subtechnique", False),
+        }
+        if status == "gap":
+            gaps.append(entry)
+        else:
+            entry["rules"] = [
+                {"name": r["name"], "title": r["title"], "status": r["status"]} for r in rules
+            ]
+            (covered if status == "covered" else partial).append(entry)
+
+    return {
+        "query_type": "tactic",
+        "tactic": tactic,
+        "total_techniques": len(matching),
+        "covered_count": len(covered),
+        "partial_count": len(partial),
+        "gap_count": len(gaps),
+        "covered": covered,
+        "partial": partial,
+        "gaps": gaps,
+    }
+
+
+def _build_suggestion(technique_id: str, name: str | None, tactics: list[str]) -> dict:
+    """Build a coarse detection starting point for a technique with no rule
+    coverage yet, using TACTIC_DETECTION_HINTS. Not technique-specific logic -
+    just where to start looking (log source, event types)."""
+    known_tactics = [t for t in tactics if t in TACTIC_DETECTION_HINTS]
+    if not known_tactics:
+        return {
+            "tactics_used": [],
+            "suggested_logsource": {"product": "windows", "service": "security"},
+            "suggested_signals": [
+                "No cached ATT&CK tactic data for this technique - defaulting to the "
+                "Windows Security log. Run download_attack_data.py for tailored hints, "
+                "or check the technique's page on attack.mitre.org for its Data Sources."
+            ],
+            "guidance": (
+                f"Identify the specific Windows or Sysmon event that captures "
+                f"{name or technique_id} activity, then narrow the selection to field "
+                f"values unique to this technique rather than the tactic in general."
+            ),
+        }
+
+    signals = []
+    for tactic in known_tactics:
+        for signal in TACTIC_DETECTION_HINTS[tactic]["signals"]:
+            if signal not in signals:
+                signals.append(signal)
+
+    return {
+        "tactics_used": known_tactics,
+        "suggested_logsource": TACTIC_DETECTION_HINTS[known_tactics[0]]["logsource"],
+        "suggested_signals": signals,
+        "guidance": (
+            f"Identify the specific Windows or Sysmon event that captures "
+            f"{name or technique_id} activity, then narrow the selection to field "
+            f"values unique to this technique rather than the tactic in general."
+        ),
+    }
+
+
+def _render_rule_template(
+    technique_id: str,
+    name: str | None,
+    description: str | None,
+    url: str | None,
+    tactics: list[str],
+    rule_id: str,
+) -> str:
+    """Render a starter Sigma rule as raw YAML text for a technique with no
+    coverage. Hand-formatted (not built via yaml.dump) to match this repo's
+    existing rules/*.yml style."""
+    today = datetime.date.today().isoformat()
+    display_name = name or technique_id
+
+    known_tactics = [t for t in tactics if t in TACTIC_DETECTION_HINTS]
+    tag_lines = "\n".join(f"    - attack.{t}" for t in known_tactics) or "    - attack.TODO_TACTIC"
+    tag_lines += f"\n    - {_technique_tag(technique_id)}"
+
+    logsource = (
+        TACTIC_DETECTION_HINTS[known_tactics[0]]["logsource"]
+        if known_tactics
+        else {"product": "windows", "service": "security"}
+    )
+    logsource_lines = "\n".join(f"    {k}: {v}" for k, v in logsource.items())
+
+    first_desc_line = description.strip().splitlines()[0] if description else None
+    desc_body = first_desc_line or f"detect {display_name} ({technique_id}) activity"
+
+    ref_lines = f"    - {url}" if url else f"    - https://attack.mitre.org/techniques/{technique_id.replace('.', '/')}/"
+
+    return f"""title: TODO - {display_name} Detection
+id: {rule_id}
+status: experimental
+description: |
+    TODO - this is a generated template, not a validated detection. Replace
+    this with a real description once the selection logic below is filled
+    in. Starting point: {desc_body}.
+references:
+{ref_lines}
+author: detection-engineering-lab
+date: {today}
+modified: {today}
+tags:
+{tag_lines}
+logsource:
+{logsource_lines}
+detection:
+    selection:
+        # TODO: replace with the real EventID/fields that capture this
+        # technique - see the "suggestion" field from suggest_rule for a
+        # starting log source and event types.
+        EventID: 0
+    condition: selection
+falsepositives:
+    - TODO
+level: medium
+"""
+
+
+@mcp.tool()
+def suggest_rule(technique_id: str, create_rule: bool = False, rule_name: str | None = None) -> dict:
+    """Check whether an ATT&CK technique has rule coverage in rules/, and if
+    it's a gap, suggest a detection starting point (and optionally write a
+    starter rule template).
+
+    technique_id: e.g. "T1110.003" (case-insensitive, with or without the
+        leading "T").
+    create_rule: if True and the technique is a genuine gap (no existing
+        rules/ reference it at all), writes a starter Sigma template to
+        rules/ with TODO placeholders for the real selection logic. Does
+        nothing if the technique already has "partial" or "covered"
+        coverage, to avoid creating redundant/conflicting rules - improve
+        the existing rule(s) instead (see "existing_rules").
+    rule_name: filename stem for the created template (letters, digits,
+        underscore, hyphen only). If omitted, defaults to
+        "template_t<id_with_underscores>", e.g. "template_t1110_003".
+    """
+    technique_id = technique_id.strip()
+    if not TECHNIQUE_ID_RE.fullmatch(technique_id):
+        return {"error": f"'{technique_id}' doesn't look like an ATT&CK technique ID (e.g. 'T1110.003')"}
+
+    report = _technique_report(technique_id)
+    normalized_id = report["technique_id"]
+
+    result = {
+        "technique_id": normalized_id,
+        "coverage": report["coverage"],
+        "existing_rules": report["rules"],
+        "name": report.get("name"),
+        "tactics": report.get("tactics"),
+    }
+    if report.get("note"):
+        result["attack_data_note"] = report["note"]
+
+    if report["coverage"] != "gap":
+        result["suggestion"] = None
+        result["template_created"] = False
+        result["template_note"] = (
+            f"'{normalized_id}' already has {report['coverage']} coverage from "
+            f"{len(report['rules'])} rule(s) - see \"existing_rules\". No template created; "
+            f"improve or promote an existing rule instead of adding a redundant one."
         )
         return result
 
-    technique = techniques.get(normalized_id)
-    if technique is None:
-        result["name"] = None
-        result["description"] = None
-        result["attack_data_available"] = True
-        result["note"] = f"'{normalized_id}' was not found in the cached ATT&CK data."
+    tactics = report.get("tactics") or []
+    result["suggestion"] = _build_suggestion(normalized_id, report.get("name"), tactics)
+
+    if not create_rule:
+        result["template_created"] = False
+        result["template_note"] = "Pass create_rule=True to write a starter rule template to rules/."
         return result
 
-    result["name"] = technique.get("name")
-    result["description"] = technique.get("description")
-    result["tactics"] = technique.get("tactics")
-    result["url"] = technique.get("url")
+    if rule_name:
+        if not RULE_NAME_RE.fullmatch(rule_name):
+            return {"error": f"Invalid rule_name '{rule_name}'"}
+        stem = rule_name
+    else:
+        stem = "template_t" + normalized_id[1:].replace(".", "_").lower()
+
+    rule_path = DETECTION_RULES_DIR / f"{stem}.yml"
+    if rule_path.exists():
+        result["template_created"] = False
+        result["template_note"] = f"'{rule_path.name}' already exists in {DETECTION_RULES_DIR}; not overwriting."
+        return result
+
+    rule_id = str(uuid.uuid4())
+    template = _render_rule_template(
+        normalized_id, report.get("name"), report.get("description"), report.get("url"), tactics, rule_id
+    )
+    DETECTION_RULES_DIR.mkdir(parents=True, exist_ok=True)
+    rule_path.write_text(template, encoding="utf-8")
+
+    result["template_created"] = True
+    result["template_path"] = str(rule_path.relative_to(PROJECT_ROOT))
+    result["template_raw"] = template
     return result
 
 
