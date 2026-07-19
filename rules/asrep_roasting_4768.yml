@@ -1,0 +1,38 @@
+title: AS-REP Roasting - Kerberos TGT Request with Preauthentication Disabled
+id: 2b8dd962-7394-41a3-8444-e5c69142fcac
+status: stable
+description: |
+    Detects a Kerberos TGT request (AS-REQ/AS-REP) using the weak RC4-HMAC
+    (0x17) ticket encryption type for an account with Kerberos
+    pre-authentication disabled (PreAuthType 0). This is the AS-REP Roasting
+    technique: an attacker requests an AS-REP for an account configured with
+    "Do not require Kerberos preauthentication" and cracks the returned
+    ticket offline to recover the account's plaintext password - no valid
+    credentials are needed and, unlike a normal failed logon, no 4625 event
+    is generated.
+references:
+    - https://attack.mitre.org/techniques/T1558/004/
+    - https://www.picussecurity.com/resource/blog/as-rep-roasting-attack-explained-mitre-attack-t1558.004
+    - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/builtin/security/win_security_kerberos_asrep_roasting.yml
+author: detection-engineering-lab
+date: 2026-07-18
+modified: 2026-07-18
+tags:
+    - attack.credential-access
+    - attack.t1558.004
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4768
+        TicketEncryptionType: '0x17'
+        PreAuthType: 0
+        ServiceName: 'krbtgt'
+    filter_machine_accounts:
+        TargetUserName|endswith: '$'
+    condition: selection and not filter_machine_accounts
+falsepositives:
+    - Legacy systems or applications still relying on RC4 encryption
+    - Accounts intentionally configured without Kerberos pre-authentication for legacy interoperability
+level: high
