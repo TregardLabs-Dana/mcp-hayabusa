@@ -36,3 +36,38 @@ falsepositives:
     - Legitimate NTLM authentication from legacy applications or non-domain-joined hosts
     - Service accounts configured to use NTLM instead of Kerberos
 level: medium
+severity_justification: >
+    Medium because an NTLM logon matching this pattern alone is
+    suggestive, not conclusive - legacy applications and misconfigured
+    service accounts produce the same signal (see falsepositives), so it
+    needs correlation with subsequent activity (e.g. pth_admin_share)
+    before treating it as confirmed Pass-the-Hash.
+test_cases:
+    - description: NTLM network logon matching the Pass-the-Hash pattern, no known host/workstation
+      should_match: true
+      log:
+          EventID: 4624
+          LogonType: 3
+          AuthenticationPackageName: NTLM
+          LogonProcessName: NtLmSsp
+          TargetUserName: jsmith
+          WorkstationName: EVILBOX
+          IpAddress: 10.0.99.50
+    - description: Anonymous logon (filtered)
+      should_match: false
+      log:
+          EventID: 4624
+          LogonType: 3
+          AuthenticationPackageName: NTLM
+          LogonProcessName: NtLmSsp
+          TargetUserName: ANONYMOUS LOGON
+          WorkstationName: '-'
+          IpAddress: '-'
+    - description: Normal Kerberos interactive logon
+      should_match: false
+      log:
+          EventID: 4624
+          LogonType: 2
+          AuthenticationPackageName: Negotiate
+          LogonProcessName: User32
+          TargetUserName: jsmith

@@ -42,3 +42,27 @@ falsepositives:
     - Legitimate administration tools and EDR/AV agents that inspect lsass.exe
     - Windows Error Reporting handling a crash of lsass.exe
 level: high
+severity_justification: >
+    High because a successful LSASS memory read yields plaintext
+    passwords, NTLM hashes, and Kerberos tickets for every logged-on
+    account on the host - not just one account, and often including
+    cached domain admin credentials on a shared/jump host.
+test_cases:
+    - description: Mimikatz-style access to lsass.exe with a credential-dumping access mask
+      should_match: true
+      log:
+          TargetImage: 'C:\Windows\System32\lsass.exe'
+          GrantedAccess: '0x1010'
+          SourceImage: 'C:\Users\Public\mimikatz.exe'
+    - description: Windows Defender (MsMpEng.exe from System32) accessing lsass.exe (filtered)
+      should_match: false
+      log:
+          TargetImage: 'C:\Windows\System32\lsass.exe'
+          GrantedAccess: '0x1010'
+          SourceImage: 'C:\Windows\System32\MsMpEng.exe'
+    - description: Access to lsass.exe with a benign, non-matching access mask
+      should_match: false
+      log:
+          TargetImage: 'C:\Windows\System32\lsass.exe'
+          GrantedAccess: '0x1000'
+          SourceImage: 'C:\Users\Public\mimikatz.exe'

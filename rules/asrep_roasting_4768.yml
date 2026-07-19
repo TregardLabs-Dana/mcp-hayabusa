@@ -36,3 +36,35 @@ falsepositives:
     - Legacy systems or applications still relying on RC4 encryption
     - Accounts intentionally configured without Kerberos pre-authentication for legacy interoperability
 level: high
+severity_justification: >
+    High, not critical, because it requires an account to already be
+    misconfigured (preauth disabled) rather than exploiting AD itself, and
+    yields one account's credentials via offline cracking rather than
+    immediate domain-wide access - but that account could still be
+    privileged, and cracking success depends only on password strength,
+    not on the attacker holding any prior credentials.
+test_cases:
+    - description: AS-REP Roasting against a user account with preauth disabled
+      should_match: true
+      log:
+          EventID: 4768
+          TicketEncryptionType: '0x17'
+          PreAuthType: 0
+          ServiceName: krbtgt
+          TargetUserName: jsmith
+    - description: Same pattern but against a machine account (filtered)
+      should_match: false
+      log:
+          EventID: 4768
+          TicketEncryptionType: '0x17'
+          PreAuthType: 0
+          ServiceName: krbtgt
+          TargetUserName: 'WKSTN-2214$'
+    - description: Normal TGT request with preauth completed and AES encryption
+      should_match: false
+      log:
+          EventID: 4768
+          TicketEncryptionType: '0x12'
+          PreAuthType: 2
+          ServiceName: krbtgt
+          TargetUserName: jsmith

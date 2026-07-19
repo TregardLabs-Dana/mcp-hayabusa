@@ -35,3 +35,29 @@ falsepositives:
     - Legitimate Domain Controllers and Azure AD Connect / directory sync service accounts
     - Backup and replication solutions granted explicit replication rights
 level: critical
+severity_justification: >
+    Critical because a successful DCSync yields domain-wide credential
+    material in one request, including the krbtgt hash - which enables
+    Golden Ticket forgery and effectively unlimited persistent domain
+    access. This is full domain compromise, not a single-account
+    incident (see the credential-theft playbook's containment/eradication
+    steps, including the krbtgt double-reset).
+test_cases:
+    - description: Replication request from a non-DC user account (DCSync)
+      should_match: true
+      log:
+          EventID: 4662
+          SubjectUserName: svc-backup
+          Properties: '{1131f6aa-9c07-11d1-f79f-00c04fc2dcd2}'
+    - description: Replication request from a Domain Controller machine account (filtered)
+      should_match: false
+      log:
+          EventID: 4662
+          SubjectUserName: 'DC02$'
+          Properties: '{1131f6aa-9c07-11d1-f79f-00c04fc2dcd2}'
+    - description: Unrelated 4662 object-access event without a replication extended right
+      should_match: false
+      log:
+          EventID: 4662
+          SubjectUserName: jsmith
+          Properties: '{bf967aba-0de6-11d0-a285-00aa003049e2}'

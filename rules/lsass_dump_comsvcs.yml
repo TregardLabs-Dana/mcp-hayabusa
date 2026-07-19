@@ -24,9 +24,37 @@ detection:
     selection_img:
         Image|endswith: '\rundll32.exe'
     selection_cli:
-        CommandLine|contains: 'comsvcs.dll'
-        CommandLine|contains: 'MiniDump'
+        CommandLine|contains|all:
+            - 'comsvcs.dll'
+            - 'MiniDump'
     condition: selection_img and selection_cli
 falsepositives:
     - Very unlikely - comsvcs.dll MiniDump is not used for legitimate administration
 level: critical
+severity_justification: >
+    Critical because, like direct LSASS process access, a successful
+    dump yields plaintext passwords/hashes/tickets for every logged-on
+    account - and the near-zero false-positive rate (no legitimate admin
+    workflow uses this LOLBin technique) means a match should be treated
+    as confirmed malicious, not just suspicious.
+test_cases:
+    - description: rundll32 invoking comsvcs.dll MiniDump against lsass.exe
+      should_match: true
+      log:
+          Image: 'C:\Windows\System32\rundll32.exe'
+          CommandLine: 'rundll32.exe C:\Windows\System32\comsvcs.dll, MiniDump 660 C:\Windows\Temp\lsass.dmp full'
+    - description: rundll32 invoking an unrelated DLL export (no comsvcs.dll)
+      should_match: false
+      log:
+          Image: 'C:\Windows\System32\rundll32.exe'
+          CommandLine: 'rundll32.exe C:\Windows\System32\shell32.dll,Control_RunDLL'
+    - description: comsvcs.dll referenced but not via rundll32.exe
+      should_match: false
+      log:
+          Image: 'C:\Tools\custom_loader.exe'
+          CommandLine: 'custom_loader.exe comsvcs.dll MiniDump'
+    - description: rundll32 command line containing "MiniDump" without "comsvcs.dll" (regression case for the previous duplicate-key bug, where only the MiniDump check was ever applied)
+      should_match: false
+      log:
+          Image: 'C:\Windows\System32\rundll32.exe'
+          CommandLine: 'rundll32.exe SomeOtherTool.dll,MiniDump'

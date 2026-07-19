@@ -1,13 +1,22 @@
-title: Pass-the-Hash Lateral Movement via Administrative Share Access
+title: Administrative Share Access - Potential Lateral Movement Staging
 id: 8d6c9d54-1d75-42e6-8b54-a0c53341cd98
 status: experimental
 description: |
-    Detects an NTLM network logon (Type 3) immediately followed by access to an
-    administrative share (ADMIN$, C$, IPC$) from the same source, without an
-    interactive or RDP session on the target - the typical pattern of tools
-    such as Mimikatz's `sekurlsa::pth`, Impacket's `wmiexec`/`psexec`, or
-    CrackMapExec replaying a stolen NTLM hash to move laterally and execute
-    commands remotely.
+    Detects access to an administrative share (ADMIN$, C$, IPC$) - the
+    typical pattern of tools such as Mimikatz's `sekurlsa::pth`, Impacket's
+    `wmiexec`/`psexec`, or CrackMapExec staging a payload or executing
+    commands remotely after a Pass-the-Hash logon.
+
+    This is a single-event, EventID 5140-only signal by design: an earlier
+    version of this rule tried to additionally require an EventID 4624
+    NTLM logon (`selection_logon and selection_share`), but that combined
+    two different EventIDs in a plain Sigma AND, which no single EVTX
+    record can ever satisfy (one record has exactly one EventID) - so it
+    could never fire under Hayabusa's per-record evaluation. The NTLM-logon
+    half of that pattern is now its own rule, pth_logon_4624.yml; treat a
+    5140 hit here alongside a pth_logon_4624 hit from the same source and
+    timeframe as high-confidence Pass-the-Hash, and a 5140 hit alone as a
+    lower-confidence signal worth triage (see falsepositives).
 references:
     - https://attack.mitre.org/techniques/T1550/002/
     - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/builtin/security/win_security_susp_pass_the_hash.yml
@@ -22,18 +31,40 @@ logsource:
     product: windows
     service: security
 detection:
-    selection_logon:
-        EventID: 4624
-        LogonType: 3
-        AuthenticationPackageName: 'NTLM'
     selection_share:
         EventID: 5140
         ShareName|contains:
             - 'ADMIN$'
             - 'C$'
             - 'IPC$'
-    condition: selection_logon and selection_share
+    condition: selection_share
 falsepositives:
     - Legitimate remote administration via PsExec, SCCM, or backup software using NTLM
     - Group Policy or software deployment tools that rely on administrative shares
-level: medium
+    - Standalone (without a correlating pth_logon_4624 hit), this fires on routine legitimate admin-share access and should be triaged, not auto-escalated
+level: low
+severity_justification: >
+    Low on its own, because administrative share access alone is common
+    in legitimate remote administration (PsExec, SCCM, backups, GPO
+    software deployment - see falsepositives) and this rule can no longer
+    require the corroborating NTLM logon signal within Sigma/Hayabusa's
+    single-event evaluation model. Treat a hit here paired with a
+    same-source, same-window pth_logon_4624 hit as much higher confidence
+    (see that rule's description) - that correlation has to happen in the
+    SOC/SIEM layer, not in this rule.
+test_cases:
+    - description: Administrative share access to ADMIN$
+      should_match: true
+      log:
+          EventID: 5140
+          ShareName: '\\FS01\ADMIN$'
+    - description: Administrative share access to IPC$
+      should_match: true
+      log:
+          EventID: 5140
+          ShareName: '\\FS01\IPC$'
+    - description: Access to a normal, non-administrative file share
+      should_match: false
+      log:
+          EventID: 5140
+          ShareName: '\\FS01\Finance'

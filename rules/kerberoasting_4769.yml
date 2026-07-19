@@ -23,7 +23,6 @@ detection:
     selection:
         EventID: 4769
         TicketEncryptionType: '0x17'
-        ServiceName|endswith: '$'
     filter_machine_accounts:
         ServiceName|endswith: '$'
         TargetUserName|endswith: '$'
@@ -34,3 +33,31 @@ falsepositives:
     - Legacy applications or devices that only support RC4 encryption
     - Misconfigured service accounts without AES support enabled
 level: high
+severity_justification: >
+    High, not critical, because it compromises one service account's
+    password via offline cracking rather than granting immediate
+    domain-wide access - but service accounts are frequently
+    over-privileged (e.g. local admin on many hosts) and cracking success
+    depends only on that account's password strength.
+test_cases:
+    - description: Kerberoasting of a normal (non-machine) service account with RC4
+      should_match: true
+      log:
+          EventID: 4769
+          TicketEncryptionType: '0x17'
+          ServiceName: svc-sql
+          TargetUserName: attacker-user
+    - description: TGS request for krbtgt (filtered)
+      should_match: false
+      log:
+          EventID: 4769
+          TicketEncryptionType: '0x17'
+          ServiceName: krbtgt
+          TargetUserName: attacker-user
+    - description: Normal TGS request using AES encryption
+      should_match: false
+      log:
+          EventID: 4769
+          TicketEncryptionType: '0x12'
+          ServiceName: svc-sql
+          TargetUserName: attacker-user
