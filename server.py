@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -14,6 +15,15 @@ HAYABUSA_DIR = PROJECT_ROOT / "hayabusa"
 HAYABUSA_EXE = HAYABUSA_DIR / ("hayabusa.exe" if os.name == "nt" else "hayabusa")
 RULES_DIR = HAYABUSA_DIR / "rules"
 RULES_CONFIG_DIR = RULES_DIR / "config"
+
+# Our own curated Sigma rules (detection engineering knowledge base), distinct
+# from RULES_DIR above which holds the full upstream Hayabusa/Sigma ruleset
+# used for scanning.
+DETECTION_RULES_DIR = PROJECT_ROOT / "rules"
+RULE_NAME_RE = re.compile(r"[A-Za-z0-9_\-]+")
+
+# Local cache of MITRE ATT&CK technique metadata, built by download_attack_data.py.
+ATTACK_TECHNIQUES_PATH = PROJECT_ROOT / "mappings" / "attack_techniques.json"
 
 VALID_SEVERITIES = ["informational", "low", "medium", "high", "critical"]
 VALID_OUTPUT_FORMATS = ["summary", "full"]
@@ -144,7 +154,7 @@ def scan_evtx(
     }
 
 
-def _rule_summary(rule: dict, rule_path: Path) -> dict:
+def _rule_summary(rule: dict, rule_path: Path, base_dir: Path) -> dict:
     description = rule.get("description")
     return {
         "id": rule.get("id"),
@@ -154,7 +164,7 @@ def _rule_summary(rule: dict, rule_path: Path) -> dict:
         "description": description.strip().splitlines()[0] if description else None,
         "logsource": {k: v for k, v in (rule.get("logsource") or {}).items() if v},
         "tags": rule.get("tags") or [],
-        "file": str(rule_path.relative_to(RULES_DIR)),
+        "file": str(rule_path.relative_to(base_dir)),
     }
 
 
@@ -209,7 +219,7 @@ def get_hayabusa_rules(keyword: str | None = None, max_results: int = 100) -> di
             if needle not in haystack:
                 continue
 
-        matches.append(_rule_summary(rule, rule_path))
+        matches.append(_rule_summary(rule, rule_path, RULES_DIR))
 
     total_count = len(matches)
     truncated = total_count > max_results
@@ -222,6 +232,145 @@ def get_hayabusa_rules(keyword: str | None = None, max_results: int = 100) -> di
         "truncated": truncated,
         "rules": matches,
     }
+
+
+def _iter_detection_rules():
+    """Yield (path, parsed rule) for every valid Sigma rule in DETECTION_RULES_DIR."""
+    for rule_path in sorted(DETECTION_RULES_DIR.glob("*.yml")):
+        try:
+            rule = yaml.safe_load(rule_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(rule, dict) and rule.get("title"):
+            yield rule_path, rule
+
+
+def _technique_tag(technique_id: str) -> str:
+    """Normalize e.g. "T1003.001", "t1003.001", or "1003.001" to the
+    "attack.tNNNN.NNN" form used in a Sigma rule's tags list."""
+    return "attack.t" + technique_id.lower().lstrip("t")
+
+
+def _find_rules_by_technique(technique_id: str) -> list[dict]:
+    target_tag = _technique_tag(technique_id)
+    return [
+        {"name": rule_path.stem, **_rule_summary(rule, rule_path, DETECTION_RULES_DIR)}
+        for rule_path, rule in _iter_detection_rules()
+        if target_tag in [str(t).lower() for t in (rule.get("tags") or [])]
+    ]
+
+
+def _load_attack_techniques() -> dict:
+    """Load the local ATT&CK technique cache built by download_attack_data.py.
+    Returns {} if it hasn't been downloaded yet."""
+    if not ATTACK_TECHNIQUES_PATH.exists():
+        return {}
+    try:
+        return json.loads(ATTACK_TECHNIQUES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _assess_coverage(rules: list[dict]) -> str:
+    """covered: at least one matching rule has graduated past experimental
+    status. partial: rules exist but are all still experimental/unstable.
+    gap: no rules reference this technique at all."""
+    if not rules:
+        return "gap"
+    if any(r.get("status") == "stable" for r in rules):
+        return "covered"
+    return "partial"
+
+
+@mcp.resource("detection://rules")
+def list_detection_rules() -> dict:
+    """List all Sigma detection rules in the knowledge base (rules/ directory)."""
+    if not DETECTION_RULES_DIR.exists():
+        return {"error": f"Rules directory not found at {DETECTION_RULES_DIR}"}
+
+    rules = [
+        {"name": rule_path.stem, **_rule_summary(rule, rule_path, DETECTION_RULES_DIR)}
+        for rule_path, rule in _iter_detection_rules()
+    ]
+    return {"count": len(rules), "rules": rules}
+
+
+@mcp.resource("detection://rules/{rule_name}")
+def get_detection_rule(rule_name: str) -> dict:
+    """Get a specific Sigma rule's full content by name (the .yml filename in
+    rules/, without the extension - use the "name" field from detection://rules)."""
+    if not RULE_NAME_RE.fullmatch(rule_name):
+        return {"error": f"Invalid rule name '{rule_name}'"}
+
+    rule_path = DETECTION_RULES_DIR / f"{rule_name}.yml"
+    if not rule_path.exists():
+        return {"error": f"Rule '{rule_name}' not found in {DETECTION_RULES_DIR}"}
+
+    try:
+        raw = rule_path.read_text(encoding="utf-8")
+        rule = yaml.safe_load(raw)
+    except (OSError, yaml.YAMLError) as exc:
+        return {"error": f"Failed to read rule '{rule_name}': {exc}"}
+
+    return {"name": rule_name, "file": rule_path.name, "rule": rule, "raw": raw}
+
+
+@mcp.resource("detection://rules/by-technique/{technique_id}")
+def get_rules_by_technique(technique_id: str) -> dict:
+    """List rules tagged with a given ATT&CK technique ID, e.g. "T1003.001"
+    or "T1558.003" (case-insensitive, with or without the leading "T")."""
+    if not DETECTION_RULES_DIR.exists():
+        return {"error": f"Rules directory not found at {DETECTION_RULES_DIR}"}
+
+    rules = _find_rules_by_technique(technique_id)
+    return {"technique_id": technique_id, "count": len(rules), "rules": rules}
+
+
+@mcp.resource("detection://attack/techniques/{technique_id}")
+def get_attack_technique(technique_id: str) -> dict:
+    """Look up a MITRE ATT&CK technique (name, description, tactics) and
+    report our Sigma rule coverage for it.
+
+    technique_id: e.g. "T1003.001" (case-insensitive, with or without the
+        leading "T"). Technique metadata comes from the local cache at
+        mappings/attack_techniques.json - run download_attack_data.py first
+        to populate/refresh it from the MITRE ATT&CK STIX dataset. Coverage
+        is always computed live from the "attack.tNNNN.NNN" tags on rules in
+        rules/, regardless of whether that cache exists.
+    """
+    normalized_id = "T" + technique_id.upper().lstrip("T")
+
+    rules = _find_rules_by_technique(technique_id)
+    result = {
+        "technique_id": normalized_id,
+        "coverage": _assess_coverage(rules),
+        "rules": rules,
+    }
+
+    techniques = _load_attack_techniques()
+    if not techniques:
+        result["name"] = None
+        result["description"] = None
+        result["attack_data_available"] = False
+        result["note"] = (
+            f"ATT&CK technique metadata not found at {ATTACK_TECHNIQUES_PATH}. "
+            f"Run download_attack_data.py to fetch it."
+        )
+        return result
+
+    technique = techniques.get(normalized_id)
+    if technique is None:
+        result["name"] = None
+        result["description"] = None
+        result["attack_data_available"] = True
+        result["note"] = f"'{normalized_id}' was not found in the cached ATT&CK data."
+        return result
+
+    result["name"] = technique.get("name")
+    result["description"] = technique.get("description")
+    result["tactics"] = technique.get("tactics")
+    result["url"] = technique.get("url")
+    return result
 
 
 def main() -> None:

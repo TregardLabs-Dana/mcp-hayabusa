@@ -1,0 +1,38 @@
+title: Pass-the-Hash Activity via Suspicious NTLM Logon
+id: 05ad4edb-12ac-427a-907a-44a21f737a02
+status: experimental
+description: |
+    Detects a network logon (Type 3) authenticating with NTLM where the logon
+    process is seLsass/NtLmSsp and no corresponding interactive logon or Kerberos
+    pre-authentication event exists for the account on that host - a pattern
+    consistent with Pass-the-Hash, where a captured NTLM hash is replayed
+    directly to authenticate without knowledge of the plaintext password.
+references:
+    - https://attack.mitre.org/techniques/T1550/002/
+    - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/builtin/security/win_security_susp_pass_the_hash.yml
+author: detection-engineering-lab
+date: 2026-07-18
+modified: 2026-07-18
+tags:
+    - attack.lateral-movement
+    - attack.defense-evasion
+    - attack.t1550.002
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4624
+        LogonType: 3
+        AuthenticationPackageName: 'NTLM'
+        LogonProcessName: 'NtLmSsp'
+    filter_anonymous:
+        TargetUserName: 'ANONYMOUS LOGON'
+    filter_known_hosts:
+        WorkstationName: '-'
+        IpAddress: '-'
+    condition: selection and not 1 of filter_*
+falsepositives:
+    - Legitimate NTLM authentication from legacy applications or non-domain-joined hosts
+    - Service accounts configured to use NTLM instead of Kerberos
+level: medium

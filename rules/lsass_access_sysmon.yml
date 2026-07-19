@@ -1,0 +1,44 @@
+title: Suspicious Process Access to LSASS Memory
+id: c81db55e-5f41-49ab-b5ef-b5241d67e3d8
+status: stable
+description: |
+    Detects a process opening a handle to lsass.exe with an access mask commonly
+    associated with credential dumping tools (e.g. Mimikatz) reading process
+    memory to extract cached logon credentials, hashes, and Kerberos tickets.
+references:
+    - https://attack.mitre.org/techniques/T1003/001/
+    - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/process_access/proc_access_win_lsass_memdump.yml
+author: detection-engineering-lab
+date: 2026-07-18
+modified: 2026-07-18
+tags:
+    - attack.credential-access
+    - attack.t1003.001
+    - attack.s0002
+logsource:
+    category: process_access
+    product: windows
+detection:
+    selection:
+        TargetImage|endswith: '\lsass.exe'
+        GrantedAccess|contains:
+            - '0x1010'
+            - '0x1410'
+            - '0x1010'
+            - '0x1438'
+            - '0x143a'
+            - '0x1fffff'
+    filter_main_known_tools:
+        SourceImage|startswith:
+            - 'C:\Windows\System32\'
+            - 'C:\Windows\SysWOW64\'
+        SourceImage|endswith:
+            - '\svchost.exe'
+            - '\wmiprvse.exe'
+            - '\werfault.exe'
+            - '\MsMpEng.exe'
+    condition: selection and not filter_main_known_tools
+falsepositives:
+    - Legitimate administration tools and EDR/AV agents that inspect lsass.exe
+    - Windows Error Reporting handling a crash of lsass.exe
+level: high

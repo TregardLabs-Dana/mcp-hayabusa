@@ -1,0 +1,37 @@
+title: Active Directory Replication Rights Abuse (DCSync)
+id: 565e316b-38ae-4650-8851-b566057703c3
+status: stable
+description: |
+    Detects a directory replication request (DS-Replication-Get-Changes /
+    DS-Replication-Get-Changes-All / DS-Replication-Get-Changes-In-Filtered-Set
+    extended rights) issued by a security principal that is not one of the
+    domain's Domain Controller computer accounts. This is the classic DCSync
+    technique, where an attacker with sufficient replication rights impersonates
+    a domain controller to pull password hashes for arbitrary accounts,
+    including krbtgt.
+references:
+    - https://attack.mitre.org/techniques/T1003/006/
+    - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/builtin/security/win_security_ad_replication_non_machine_account.yml
+author: detection-engineering-lab
+date: 2026-07-18
+modified: 2026-07-18
+tags:
+    - attack.credential-access
+    - attack.t1003.006
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4662
+        Properties|contains:
+            - '1131f6aa-9c07-11d1-f79f-00c04fc2dcd2'
+            - '1131f6ad-9c07-11d1-f79f-00c04fc2dcd2'
+            - '89e95b76-444d-4c62-991a-0facbeda640c'
+    filter_dc_accounts:
+        SubjectUserName|endswith: '$'
+    condition: selection and not filter_dc_accounts
+falsepositives:
+    - Legitimate Domain Controllers and Azure AD Connect / directory sync service accounts
+    - Backup and replication solutions granted explicit replication rights
+level: critical

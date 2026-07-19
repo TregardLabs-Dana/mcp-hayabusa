@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa) (the Windows event log forensics/threat-hunting tool) for EVTX analysis, exposing it to Claude.
+An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa) (the Windows event log forensics/threat-hunting tool) for EVTX analysis, exposing it to Claude. In addition to Hayabusa scanning, the server provides a detection engineering knowledge base — browsable Sigma rules, ATT&CK technique mappings, and detection coverage queries.
 
 ### Goals
 
@@ -13,11 +13,21 @@ An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa)
 - Support filtering by severity level
 - Expose a `get_hayabusa_rules` tool to list/search available detection rules
 - Handle errors gracefully
+- Expose Sigma rules as browsable resources
+- Expose ATT&CK technique mappings
+- Allow Claude to query detection coverage
+- Combine with Hayabusa scanning from Module 3
 
 ### Stack
 
 - Python with the `mcp` and `pyyaml` libraries
 - Hayabusa CLI (installed locally)
+
+### Structure
+
+- `rules/` — Sigma detection rules (YAML)
+- `mappings/` — ATT&CK technique to rule mappings
+- `server.py` — MCP server with resources and tools
 
 ## Commands
 
@@ -25,13 +35,21 @@ An MCP server that wraps [Hayabusa](https://github.com/Yamato-Security/hayabusa)
 pip install -r requirements.txt           # install dependencies (mcp, pyyaml)
 python download_hayabusa.py               # fetch the Hayabusa binary + Sigma rules into ./hayabusa/
 ./hayabusa/hayabusa.exe update-rules       # refresh the ruleset (Windows; drop .exe elsewhere)
+python download_attack_data.py            # fetch MITRE ATT&CK technique data into ./mappings/attack_techniques.json
 python server.py                           # run the MCP server over stdio
 ```
 
 ## Architecture
 
 - **`download_hayabusa.py`** — fetches the latest Hayabusa GitHub release for the current OS/arch (skipping the self-contained `-live-response` variant in favor of the standard build with an external `rules/` directory), extracts it to `./hayabusa/`, and copies the versioned binary to a stable `hayabusa.exe`/`hayabusa` name so other tooling doesn't need to track the release version.
-- **`server.py`** — a `FastMCP` server exposing two tools:
+- **`download_attack_data.py`** — fetches the MITRE ATT&CK Enterprise STIX bundle (`enterprise-attack.json`, ~40MB), extracts non-revoked/non-deprecated `attack-pattern` objects (technique `id`, `name`, `description`, `tactics`, `is_subtechnique`, `url`), and writes a compact lookup to `./mappings/attack_techniques.json` keyed by ATT&CK ID (e.g. `T1003.001`). This cache is gitignored and regenerated on demand rather than fetched live per-request, since the source bundle is too large to download on every resource read.
+- **`rules/`** — our own curated Sigma detection rules (YAML), separate from the full upstream ruleset Hayabusa downloads into `./hayabusa/rules/`. Each rule is tagged with `attack.tNNNN[.NNN]` ATT&CK tags, which drive the `detection://` resources below.
+- **`mappings/`** — generated/gitignored; holds `attack_techniques.json` from `download_attack_data.py`.
+- **`server.py`** — a `FastMCP` server exposing two tools and four resources:
   - `scan_evtx(evtx_path, min_severity="informational", rule_filter=None, output_format="summary", max_results=None)`. It shells out to `hayabusa json-timeline -L` (JSONL output — the plain `-o` JSON format is a stream of pretty-printed objects, not valid JSON or true JSONL, so `-L` is required for reliable parsing), passes `min_severity` through as Hayabusa's `-m`/`--min-level` rule filter, and parses the resulting JSONL into a `detections` list. `rule_filter` is a case-insensitive substring match against each detection's `RuleTitle`, applied in Python after parsing since Hayabusa has no native rule-title filter (only `--include-tag`/`--include-category`). `output_format="summary"` (the default) strips detections down to `Timestamp`/`RuleTitle`/`Level`/`Computer`/`Channel`/`EventID`/`RecordID` to avoid blowing past tool output size limits on large scans; `"full"` keeps the complete `Details`/`ExtraFieldInfo` payload. `max_results` caps the returned list; the response reports `total_count` (pre-cap) and `truncated`. Hayabusa exits `0` even on failure (e.g. a bad input path), so errors are detected by scanning stderr for `[ERROR]` lines rather than trusting the return code. All failure modes (missing path, invalid severity/output_format/max_results, missing Hayabusa binary, timeout, scan error) return `{"error": "..."}` instead of raising.
   - `get_hayabusa_rules(keyword=None, max_results=100)`. Hayabusa has no built-in rule-listing command, so this walks `./hayabusa/rules/**/*.yml` directly and parses each Sigma rule with `pyyaml`. When `keyword` is given, a raw-text substring prefilter runs before the YAML parse (keyword search is ~1-2s; a full unfiltered listing takes several seconds longer since every rule file must be parsed). Matches are checked against `title`/`description`/`tags`/`id`; results are summarized (`id`, `title`, `level`, `status`, first line of `description`, `logsource`, `tags`, relative `file` path) and capped by `max_results`, with `total_count`/`truncated` reported the same way as `scan_evtx`.
+  - `detection://rules` — lists every rule in `./rules/` (our curated set, not Hayabusa's bundled ruleset), summarized the same way as `get_hayabusa_rules`.
+  - `detection://rules/{rule_name}` — returns one rule's full parsed content plus raw YAML, looked up by filename stem (e.g. `lsass_access_sysmon`). `rule_name` is validated against `[A-Za-z0-9_-]+` before being used to build a path, since resource URI template params can't contain `/` but could otherwise contain arbitrary characters.
+  - `detection://rules/by-technique/{technique_id}` — lists rules whose `tags` include `attack.<technique_id>`, matched case-insensitively after normalizing input like `T1003.001`/`t1003.001`/`1003.001` to `attack.t1003.001`.
+  - `detection://attack/techniques/{technique_id}` — combines ATT&CK metadata (name/description/tactics/url, from the `download_attack_data.py` cache) with our own rule coverage for that technique (reusing the by-technique lookup above). Coverage is `"gap"` (no matching rules), `"partial"` (matching rules exist but none have `status: stable`), or `"covered"` (at least one matching rule is `stable`). Coverage is always computed live from `rules/`, independent of whether the ATT&CK cache exists; if the cache is missing or the ID isn't found in it, `name`/`description` come back `null` with an explanatory `note` rather than an error, so the resource stays useful for coverage alone.
 - **`README.md`** — user-facing setup/usage instructions, including the Claude Desktop `mcpServers` config snippet for wiring this server in.

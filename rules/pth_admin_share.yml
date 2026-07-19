@@ -1,0 +1,39 @@
+title: Pass-the-Hash Lateral Movement via Administrative Share Access
+id: 8d6c9d54-1d75-42e6-8b54-a0c53341cd98
+status: experimental
+description: |
+    Detects an NTLM network logon (Type 3) immediately followed by access to an
+    administrative share (ADMIN$, C$, IPC$) from the same source, without an
+    interactive or RDP session on the target - the typical pattern of tools
+    such as Mimikatz's `sekurlsa::pth`, Impacket's `wmiexec`/`psexec`, or
+    CrackMapExec replaying a stolen NTLM hash to move laterally and execute
+    commands remotely.
+references:
+    - https://attack.mitre.org/techniques/T1550/002/
+    - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/builtin/security/win_security_susp_pass_the_hash.yml
+author: detection-engineering-lab
+date: 2026-07-18
+modified: 2026-07-18
+tags:
+    - attack.lateral-movement
+    - attack.t1550.002
+    - attack.t1021.002
+logsource:
+    product: windows
+    service: security
+detection:
+    selection_logon:
+        EventID: 4624
+        LogonType: 3
+        AuthenticationPackageName: 'NTLM'
+    selection_share:
+        EventID: 5140
+        ShareName|contains:
+            - 'ADMIN$'
+            - 'C$'
+            - 'IPC$'
+    condition: selection_logon and selection_share
+falsepositives:
+    - Legitimate remote administration via PsExec, SCCM, or backup software using NTLM
+    - Group Policy or software deployment tools that rely on administrative shares
+level: medium
