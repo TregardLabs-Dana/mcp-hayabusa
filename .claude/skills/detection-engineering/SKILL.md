@@ -86,11 +86,12 @@ python .claude/skills/detection-engineering/scripts/validate_rule.py --json rule
 
 Exits non-zero if anything fails. Run this after writing or editing a rule, before considering the work done.
 
-## Reference material
+## References
 
-- `references/example-rules/lsass_memory_access.yml` — a fully compliant rule hitting all five standards at once; use as a starting template for a new rule.
-- `references/severity-guide.md` — the rubric behind standard #2: when a technique is `low`/`medium`/`high`/`critical`, and what `severity_justification:` should actually argue.
-- `references/false-positive-patterns.md` — a catalog of common, real FP sources by category, to check against before calling a rule's `falsepositives:` list complete.
+When writing rules, consult:
+- `references/example-rules/` - Well-formatted examples to follow
+- `references/severity-guide.md` - Severity level guidance
+- `references/false-positive-patterns.md` - Common FP documentation
 
 **Known gap:** as of this skill's creation, none of the 8 existing rules in `rules/` have `severity_justification:` or `test_cases:` yet (both are new requirements introduced by this skill, not retrofitted). Don't treat that as acceptable for *new* rules - and if asked to touch an existing rule for an unrelated reason, it's worth backfilling those two fields on the file you're already editing.
 
