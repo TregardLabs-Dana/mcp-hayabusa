@@ -1,0 +1,81 @@
+title: Suspicious Process Access to LSASS Memory
+id: 8f3c2a1e-9b7d-4e6a-a2c5-1d4f7e8b9c0a
+status: stable
+description: |
+    Detects a process opening a handle to lsass.exe with an access mask commonly
+    associated with credential dumping tools (e.g. Mimikatz, ProcDump) reading
+    process memory to extract cached logon credentials, hashes, and Kerberos
+    tickets.
+references:
+    - https://attack.mitre.org/techniques/T1003/001/
+    - https://github.com/SigmaHQ/sigma/blob/master/rules/windows/process_access/proc_access_win_lsass_memdump.yml
+author: detection-engineering-lab
+date: 2026-07-20
+tags:
+    # Tactic tag - encouraged but not required.
+    - attack.credential-access
+    # Technique tag - REQUIRED (standard #1). Must match attack.tXXXX or
+    # attack.tXXXX.XXX case-insensitively, or this rule is invisible to
+    # analyze_coverage / detection://rules/by-technique.
+    - attack.t1003.001
+logsource:
+    category: process_access
+    product: windows
+detection:
+    selection:
+        TargetImage|endswith: '\lsass.exe'
+        GrantedAccess|contains:
+            - '0x1010'
+            - '0x1410'
+            - '0x1438'
+            - '0x143a'
+            - '0x1fffff'
+    filter_main_known_tools:
+        SourceImage|startswith:
+            - 'C:\Windows\System32\'
+            - 'C:\Windows\SysWOW64\'
+        SourceImage|endswith:
+            - '\svchost.exe'
+            - '\wmiprvse.exe'
+            - '\werfault.exe'
+            - '\MsMpEng.exe'
+    condition: selection and not filter_main_known_tools
+falsepositives:
+    # Standard #3 - name the actual legitimate tool/process/workflow, not
+    # generic filler like "Unknown" or "None". See false-positive-patterns.md.
+    - Legitimate administration tools and EDR/AV agents that inspect lsass.exe
+    - Windows Error Reporting handling a crash of lsass.exe
+level: high
+# Standard #2 - one sentence on blast radius / attacker gain, not a restatement
+# of the description. See severity-guide.md for the level rubric.
+severity_justification: >
+    High because a successful LSASS memory read yields plaintext passwords,
+    NTLM hashes, and Kerberos tickets for every logged-on account on the
+    host - not just one account, and often including cached domain admin
+    credentials on a shared/jump host.
+# Standard #4 - at least one should_match: true case is required; a
+# should_match: false case is strongly encouraged whenever the rule has a
+# filter_* block (this one does).
+test_cases:
+    - description: Mimikatz-style access to lsass.exe with a credential-dumping access mask
+      should_match: true
+      log:
+          TargetImage: 'C:\Windows\System32\lsass.exe'
+          GrantedAccess: '0x1010'
+          SourceImage: 'C:\Users\Public\mimikatz.exe'
+    - description: Windows Defender (MsMpEng.exe from System32) accessing lsass.exe (filtered)
+      should_match: false
+      log:
+          TargetImage: 'C:\Windows\System32\lsass.exe'
+          GrantedAccess: '0x1010'
+          SourceImage: 'C:\Windows\System32\MsMpEng.exe'
+    - description: Access to lsass.exe with a benign, non-matching access mask
+      should_match: false
+      log:
+          TargetImage: 'C:\Windows\System32\lsass.exe'
+          GrantedAccess: '0x1000'
+          SourceImage: 'C:\Users\Public\mimikatz.exe'
+
+# Standard #5 (not visible in the YAML itself): this file must be saved as
+# lsass_memory_access.yml - lowercase_with_underscores, no hyphens/camelCase,
+# and the filename stem becomes the rule's identifier everywhere in server.py.
