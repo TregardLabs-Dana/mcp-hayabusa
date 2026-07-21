@@ -21,50 +21,57 @@
 
 import "pe"
 
-rule Cobalt_Strike_Beacon_Named_Pipes
+rule C2_Win_CobaltStrikeBeacon_NamedPipes
 {
     meta:
         description = "Detects default/near-default Cobalt Strike Beacon named pipe naming patterns used for SMB beacon and inter-process communication"
         author = "detection-engineering-lab"
+        date = "2026-07-20"
         reference = "https://www.cobaltstrike.com/help-smb-beacon"
         confidence = "medium"
 
     strings:
-        $pipe1 = "\\\\.\\pipe\\msagent_" ascii wide
-        $pipe2 = "\\\\.\\pipe\\status_" ascii wide
-        $pipe3 = "\\\\.\\pipe\\MSSE-" ascii wide
-        $pipe4 = "\\\\.\\pipe\\postex_" ascii wide
-        $pipe5 = "\\\\.\\pipe\\mypipe-f" ascii wide
+        $pipe1 = "\\\\.\\pipe\\msagent_" ascii
+        $pipe2 = "\\\\.\\pipe\\status_" ascii
+        $pipe3 = "\\\\.\\pipe\\MSSE-" ascii
+        $pipe4 = "\\\\.\\pipe\\postex_" ascii
+        $pipe5 = "\\\\.\\pipe\\mypipe-f" ascii
 
     condition:
         any of them
 }
 
-rule Cobalt_Strike_Beacon_HTTP_Artifacts
+rule C2_Win_CobaltStrikeBeacon_HTTPArtifacts
 {
     meta:
         description = "Detects default Cobalt Strike HTTP(S) beacon artifacts commonly left in place when operators don't fully customize a malleable C2 profile"
         author = "detection-engineering-lab"
+        date = "2026-07-20"
         reference = "https://www.cobaltstrike.com/help-malleable-c2"
         confidence = "low"
 
     strings:
-        $ua1 = "Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko" ascii wide
+        $ua1 = "Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko" ascii
+        // Contains a %d format placeholder (FP-prone per linter); mitigated
+        // by requiring 2-of-N below rather than matching on this string alone.
         $hdr1 = "Content-Length: %d\r\n\r\n" ascii
-        $marker1 = "beacon.dll" ascii wide nocase
-        $marker2 = "beacon.x64.dll" ascii wide nocase
-        $marker3 = "%s (admin)" ascii wide
+        $marker1 = "beacon.dll" ascii nocase
+        $marker2 = "beacon.x64.dll" ascii nocase
+        // Contains a %s format placeholder (FP-prone per linter); same
+        // 2-of-N mitigation as $hdr1.
+        $marker3 = "%s (admin)" ascii
         $marker4 = "ReflectiveLoader" ascii
 
     condition:
         2 of them
 }
 
-rule Cobalt_Strike_Beacon_Config_XOR
+rule C2_Win_CobaltStrikeBeacon_ConfigXOR
 {
     meta:
         description = "Detects the byte pattern produced by the classic single-byte XOR (0x69 or 0x2e) obfuscation of a Cobalt Strike Beacon config's leading type/length header fields"
         author = "detection-engineering-lab"
+        date = "2026-07-20"
         reference = "https://github.com/Sentinel-One/CobaltStrikeParser"
         confidence = "medium"
 
@@ -79,14 +86,16 @@ rule Cobalt_Strike_Beacon_Config_XOR
         any of them
 }
 
-rule Cobalt_Strike_Beacon_Combined
+rule C2_Win_CobaltStrikeBeacon_Combined
 {
     meta:
-        description = "Higher-confidence combined match: fires when a sample shows both a Beacon config XOR pattern and at least one other independent Beacon artifact (named pipe or HTTP artifact)"
+        description = "Detects Cobalt Strike Beacon with higher confidence by requiring both a beacon config XOR pattern and at least one independent artifact (named pipe or HTTP artifact) in the same sample"
         author = "detection-engineering-lab"
+        date = "2026-07-20"
+        reference = "https://attack.mitre.org/software/S0154/"
         confidence = "high"
 
     condition:
-        Cobalt_Strike_Beacon_Config_XOR
-        and (Cobalt_Strike_Beacon_Named_Pipes or Cobalt_Strike_Beacon_HTTP_Artifacts)
+        C2_Win_CobaltStrikeBeacon_ConfigXOR
+        and (C2_Win_CobaltStrikeBeacon_NamedPipes or C2_Win_CobaltStrikeBeacon_HTTPArtifacts)
 }
